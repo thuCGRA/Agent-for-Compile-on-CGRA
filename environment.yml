@@ -1,0 +1,15 @@
+name: cgra
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - langgraph
+      - deepagents
+      - langchain-core
+      - pydantic>=2
+      - pyyaml
+      - rich
+      - pytest

@@ -1,0 +1,14 @@
+name: cgra-tc
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  # LLVM 10：DFG pass 与 opt 必须同源
+  - clang=10.0.1
+  - llvmdev=10.0.1
+  - llvm-tools=10.0.1
+  - cmake>=3.20
+  - make
+  # mapper / simulator 用 GCC 7.5：与上游 ubuntu:18.04 镜像一致，绕开 GCC 13 下的 latent UB
+  - gcc_linux-64=7.5
+  - gxx_linux-64=7.5

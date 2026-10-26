@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# conda-forge 的 clang 10 只装了 clang 驱动，没有 clang++ 入口；
+# 这里用 g++ 驱动模式补一个，行为与 clang++ 一致（自动链接 libstdc++）。
+exec "${CGRA_CLANG:-clang}" --driver-mode=g++ "$@"

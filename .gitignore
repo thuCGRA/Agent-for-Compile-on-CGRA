@@ -1,0 +1,22 @@
+# 构建产物（可由 toolchain/build.sh 重建）
+build/
+toolchain/out/
+
+# vendor 快照：122 MB，由 scripts/vendor_morpher.sh 从本地 morpher 仓库重新导出
+# 来源 commit 记录在 toolchain/VENDORED.md
+toolchain/vendor/
+
+# 运行与实验数据
+work/
+runs/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
