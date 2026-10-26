@@ -4,6 +4,9 @@
 
 > 本版根据三条新决策重写：**工程跑在 WSL 原生环境**、**Python 用 conda + LangGraph/deepagents**、**LLVM 自己装、源码自己 vendor**。Morpher 从"运行依赖"降级为"对照物 + 源码来源"。
 
+> **M0 已完成（2026-10-26）**：三件套在 WSL 上从零编出，端到端冒烟通过（array_add：DFG 20 节点 → 映射 II=4/lat=11 → 仿真 387 向量零失配）。
+> 实测的版本矩阵、七个坑与复现步骤见 [ENVIRONMENT.md](ENVIRONMENT.md)；本文描述的目标结构与边界不变，但环境细节以 ENVIRONMENT.md 为准。
+
 ---
 
 ## 0. 本版变更一览
