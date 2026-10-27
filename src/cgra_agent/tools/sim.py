@@ -16,22 +16,12 @@ from typing import Any, Dict, List, Optional
 
 from ..interfaces import SimResult
 from .jobdir import JobDir, RunResult, ToolError
+from .trace import TraceNotFound, find_traces, resolve_trace  # noqa: F401  (re-exported)
 
 SIM_REL = "toolchain/out/hycube_simulator"
 RESULT_RE = re.compile(r"Simulation Result: Matches::(\d+), Mismatches::(\d+)")
 CYCLES_RE = re.compile(r"CGRA cycles:\s*(\d+)")
 ABORT_RE = re.compile(r"Assertion .* failed")
-
-# Directories that may hold instrumentation traces of a benchmark.  Trace
-# generation (clang instrumentation + llvm-link) is not part of tools/dfg.py
-# yet, so array_add reuses the fixture that ships with the simulator.
-TRACE_DIRS = (
-    "toolchain/vendor/simulator/test/library",
-    "work/smoke",
-)
-TRACE_DIRS_BY_KERNEL = (
-    "toolchain/vendor/dfggen/benchmarks/morpher_benchmarks/{kernel}/memtraces",
-)
 
 
 @dataclass
@@ -42,43 +32,6 @@ class SimOutcome:
     log_path: str = ""
     log: str = ""
 
-
-def find_traces(
-    repo_root: str,
-    kernel: str,
-    config: Optional[Dict[str, Any]] = None,
-    extra: Optional[str] = None,
-) -> List[str]:
-    """All ``*_trace_*.txt`` files that belong to ``kernel``, sorted."""
-    if extra:
-        if os.path.isdir(extra):
-            dirs = [extra]
-        elif os.path.isfile(extra):
-            return [extra]
-        else:
-            dirs = []
-    else:
-        dirs = []
-        cfg_traces = (config or {}).get("memtraces") or (config or {}).get("trace")
-        if cfg_traces:
-            p = cfg_traces if os.path.isabs(cfg_traces) else os.path.join(repo_root, cfg_traces)
-            dirs.append(p)
-        for rel in TRACE_DIRS:
-            dirs.append(os.path.join(repo_root, rel))
-        for rel in TRACE_DIRS_BY_KERNEL:
-            dirs.append(os.path.join(repo_root, rel.format(kernel=kernel)))
-
-    out: List[str] = []
-    for d in dirs:
-        if not os.path.isdir(d):
-            continue
-        for name in sorted(os.listdir(d)):
-            if not name.endswith(".txt") or "_trace_" not in name:
-                continue
-            if not name.startswith(kernel + "_trace_"):
-                continue
-            out.append(os.path.join(d, name))
-    return out
 
 
 def _diagnose_abort(

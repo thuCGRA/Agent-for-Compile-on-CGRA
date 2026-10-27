@@ -1,0 +1,15 @@
+kernel: array_cond
+c_source: toolchain/vendor/dfggen/benchmarks/morpher_benchmarks/array_cond/array_cond.c
+function: array_cond
+xdim: 4
+ydim: 4
+numberofbanks: 2
+banksize: 2048
+dfg_type: PartPred
+init_ii: 4
+max_ii: 8
+ii_ladder: [4, 5, 6, 8]
+mapper_timeout_s: 600
+kernel_walltime_s: 1200
+max_rounds: 4
+max_llm_calls: 12

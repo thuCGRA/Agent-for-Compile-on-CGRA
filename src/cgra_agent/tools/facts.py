@@ -254,6 +254,10 @@ def build_facts(dfg_path: str, arch_path: str, ii: Optional[int] = None) -> Dict
             degree[n["idx"]]["out"] += 1
             degree[cidx]["in"] += 1
 
+    # Producer latency: a value is usable `lat` cycles after the parent's phase.
+    for n in nodes:
+        n["lat"] = op_latency(arch, n["op"], n["op"] in MEMORY_OPS)
+
     bank_vars: Dict[int, List[str]] = {}
     for var, b in arch["var_bank"].items():
         bank_vars.setdefault(b, []).append(var)

@@ -166,29 +166,34 @@ def validate(
                 % (len(missing), missing[:15] + (["..."] if len(missing) > 15 else []))
             )
 
-    # -- R3 + R6: soft timing checks on the pinned subset ------------------
-    budget = max(ii - 1, 1)
+    # -- dependency lower bound (hard), R3/R6 (soft) -----------------------
+    # Dependency: a consumer must see the producer's value, i.e. its phase is at
+    # least ``lat`` cycles after the producer's phase on the cyclic schedule.
+    # The PE distance is *not* part of that bound: HyCUBE forwards
+    # combinationally within a cycle, so jump count only affects port pressure.
     for n in facts["nodes"]:
         if n["idx"] not in placement:
             continue
         a = placement[n["idx"]]
+        lat_a = int(n.get("lat") or 1)
         for cidx, port, ni in n["children"]:
             if cidx not in placement:
                 continue
             b = placement[cidx]
             d = (b["t"] - a["t"] - ni * ii) % ii
             hops = abs(a["x"] - b["x"]) + abs(a["y"] - b["y"])
+            if d < lat_a:
+                errors.append(
+                    "edge %d->%d (%s): child phase %d is %d cycle(s) after parent "
+                    "phase %d, but %s needs %d cycle(s) of latency"
+                    % (n["idx"], cidx, port or "?", b["t"], d, a["t"], n["op"], lat_a)
+                )
             if hops > d:
                 warnings.append(
-                    "edge %d->%d (%s): %d hop(s) but only %d cycle(s) of phase "
-                    "margin; the router will have to stretch it"
-                    % (n["idx"], cidx, port or "?", hops, d)
-                )
-            elif hops >= budget and ni == 0 and hops > 0:
-                warnings.append(
-                    "edge %d->%d (%s): %d hops already uses the whole phase "
-                    "budget of %d; keep these two nodes closer"
-                    % (n["idx"], cidx, port or "?", hops, budget)
+                    "edge %d->%d (%s): phase difference %d is smaller than the "
+                    "%d-hop distance; HyCUBE allows combinational forwarding so "
+                    "this is not a hard constraint, but it raises the chance of "
+                    "port conflicts" % (n["idx"], cidx, port or "?", d, hops)
                 )
 
     for n in facts["nodes"]:

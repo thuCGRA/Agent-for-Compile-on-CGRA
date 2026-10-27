@@ -10,6 +10,7 @@ Trace generation (instrument the program, run it, capture memory accesses) is
 
 from __future__ import annotations
 
+import glob
 import os
 import shutil
 import sys
@@ -113,8 +114,8 @@ def build_dfg(
     ll = kernel + ".ll"
     ll_opt = kernel + "_opt.ll"
     ll_inst = kernel + "_opt_instrument.ll"
-    dfg_name = "%s_%sDFG.xml" % (kernel, dfg_type)
-    alloc_name = kernel + "_mem_alloc.txt"
+    dfg_name = "%s_%sDFG.xml" % (func, dfg_type)
+    alloc_name = func + "_mem_alloc.txt"
     arch_name = kernel + "_mem.json"
 
     def step(cmd: List[str], log: str, what: str) -> str:
@@ -172,6 +173,20 @@ def build_dfg(
     dfg = job.file(dfg_name)
     alloc = job.file(alloc_name)
     arch = job.file(arch_name)
+    if not os.path.isfile(dfg):
+        candidates = sorted(
+            glob.glob(job.file("*_%sDFG.xml" % dfg_type)), key=os.path.getmtime
+        )
+        if candidates:
+            dfg = candidates[-1]
+            dfg_name = os.path.basename(dfg)
+    if not os.path.isfile(alloc):
+        candidates = sorted(
+            glob.glob(job.file("*_mem_alloc.txt")), key=os.path.getmtime
+        )
+        if candidates:
+            alloc = candidates[-1]
+            alloc_name = os.path.basename(alloc)
     if not os.path.isfile(dfg):
         raise ToolError("DFG pass did not write %s" % dfg_name)
     if not os.path.isfile(alloc):

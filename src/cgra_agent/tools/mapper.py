@@ -73,6 +73,7 @@ def run_mapper(
     ii: int,
     pins: Optional[str] = None,
     pins_mode: int = 0,
+    method: int = 3,
     timeout: float = 600.0,
     exe: Optional[str] = None,
     log_name: str = "mapper.log",
@@ -90,9 +91,9 @@ def run_mapper(
         "-j", str(arch),
         "-i", str(ii),
         "-t", "HyCUBE_4REG",
-        "-m", "3",
+        "-m", str(int(method)),
     ]
-    if pins:
+    if pins and method != 0:
         cmd += ["--pins", str(pins), "--pins_mode", str(pins_mode)]
     cmd += ["--report", report_path]
 

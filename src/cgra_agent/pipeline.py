@@ -25,18 +25,23 @@ import yaml
 from .interfaces import CDD, Placement
 from .llm.client import LLMClient, LLMError
 from .placers.fixed import FixedPlacer
+from .placers.greedy import GreedyError, GreedyPlacer
 from .placers.llm import LLMPlacer, PlacementSchemaError
+from .routers.pathfinder import PathFinderRouter
 from .tools.dfg import build_dfg
 from .tools.facts import build_facts, facts_for_ii
 from .tools.jobdir import Deadline, JobDir, ToolError, tail
-from .tools.mapper import MapperOutcome, run_mapper
-from .tools.sim import find_traces, run_sim
+from .tools.mapper import MapperOutcome
+from .tools.sim import run_sim
+from .tools.trace import TraceNotFound, resolve_trace
 from .tools.validate import format_feedback, validate
 
-MAX_SCHEMA_RETRIES = 2
-MAX_VALIDATE_RETRIES = 2
-MAX_MAP_RETRIES = 2
-MAX_SIM_RETRIES = 1
+# One budget, split into per-failure-type buckets (the rest is slack).  A
+# bucket that runs dry abandons that path and moves to the next II; buckets
+# never borrow from each other, so a bad placement cannot eat the routing
+# budget.
+BUCKET_LIMITS = {"validate": 2, "placement": 3, "route": 3, "sim": 1}
+DEFAULT_LADDER = (4, 5, 6, 8)
 
 
 @dataclass
@@ -64,6 +69,24 @@ def load_config(repo_root: str, kernel: str) -> Dict[str, Any]:
     if not isinstance(cfg, dict):
         raise ToolError("config %s is not a mapping" % path)
     return cfg
+
+
+def _ii_ladder(cfg, override, max_ii: int) -> List[int]:
+    """The fixed II ladder: all arms must search the same values in the same order."""
+    if override is not None:
+        raw = [int(override)]
+    elif cfg.get("ii_ladder"):
+        raw = [int(v) for v in cfg["ii_ladder"]]
+    else:
+        start = max(1, int(cfg.get("init_ii") or DEFAULT_LADDER[0]))
+        raw = [start] + [v for v in DEFAULT_LADDER if v > start]
+    ladder: List[int] = []
+    for v in raw:
+        v = max(1, int(v))
+        if v > max_ii or v in ladder:
+            continue
+        ladder.append(v)
+    return ladder or [max(1, min(max_ii, DEFAULT_LADDER[0]))]
 
 
 def _pins_payload(placement: Placement, ii: int, source: str, mode: int) -> Dict[str, Any]:
@@ -130,6 +153,8 @@ class Pipeline:
         kernel_walltime_s: Optional[float] = None,
         trace: Optional[str] = None,
         pins_file: Optional[str] = None,
+        placer: str = "llm",
+        pins_mode: Optional[int] = None,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
@@ -148,6 +173,8 @@ class Pipeline:
         self.walltime_override = kernel_walltime_s
         self.trace_arg = trace
         self.pins_file = pins_file
+        self.placer_kind = (placer or "llm").lower()
+        self.pins_mode = pins_mode
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
@@ -181,7 +208,11 @@ class Pipeline:
             self.max_llm_calls_override or cfg.get("max_llm_calls") or 12
         )
         max_rounds = int(cfg.get("max_rounds") or 4)
+        ladder = _ii_ladder(cfg, self.ii_override, max_ii)
         deadline = Deadline(walltime)
+        router = PathFinderRouter(
+            repo_root=self.repo_root, xdim=xdim, ydim=ydim, timeout=mapper_timeout
+        )
 
         # S0 init -----------------------------------------------------------
         run_dir = self._new_run_dir()
@@ -191,7 +222,8 @@ class Pipeline:
             {
                 "arm": self.arm,
                 "seed": self.seed,
-                "run_ii": self.ii_override or cfg.get("init_ii") or 1,
+                "run_ii": ladder[0],
+                "ii_ladder": ladder,
                 "max_llm_calls": max_llm_calls,
                 "mapper_timeout_s": mapper_timeout,
                 "kernel_walltime_s": walltime,
@@ -203,7 +235,11 @@ class Pipeline:
 
         llm_log = job.file("llm_calls.jsonl")
         client = None
-        if self.pins_file:
+        if self.placer_kind == "greedy":
+            placer = GreedyPlacer()
+        elif self.pins_file or self.placer_kind == "fixed":
+            if not self.pins_file:
+                raise ToolError("placer=fixed needs --pins-file")
             placer = FixedPlacer.from_file(self.pins_file)
         else:
             client = LLMClient(
@@ -239,13 +275,12 @@ class Pipeline:
             "error": "",
         }
 
-        ii = int(self.ii_override or cfg.get("init_ii") or 1)
-        ii = max(1, ii)
-        run["ii"] = {"start": ii, "max": max_ii, "final": None}
+        ii = int(ladder[0])
+        run["ii"] = {"start": ladder[0], "ladder": ladder, "max": max_ii, "final": None}
         attempts: List[Dict[str, Any]] = run["attempts"]
         feedback: Optional[str] = None
         previous: Optional[Any] = None
-        schema_retries = validate_retries = map_retries = sim_retries = 0
+        buckets = {"validate": 0, "placement": 0, "route": 0, "sim": 0}
         mapper_rounds = 0
         llm_calls = 0
         status = "failed"
@@ -313,13 +348,31 @@ class Pipeline:
             return self._finish(job, run, started, status, error, cdd)
         floor = max(1, int(facts["min_ii"]))
         if ii < floor:
-            ii = floor
+            start_pos = next((i for i, v in enumerate(ladder) if v >= floor), None)
+            if start_pos is None:
+                error = "S2 facts: min_ii=%d exceeds the II ladder %s" % (floor, ladder)
+                return self._finish(job, run, started, status, error, cdd)
+            ii = int(ladder[start_pos])
             facts = facts_for_ii(facts, ii)
             job.write_json("facts.json", facts)
             self._say("S2", "II raised to the resource bound %d" % ii)
+        else:
+            start_pos = 0
 
         # S3..S8 loop -------------------------------------------------------
         run["stage"] = "S3"
+        ladder_pos = start_pos
+
+        def advance_ii() -> bool:
+            """Move to the next II in the ladder, resetting every bucket."""
+            nonlocal ladder_pos
+            ladder_pos += 1
+            if ladder_pos >= len(ladder):
+                return False
+            for key in buckets:
+                buckets[key] = 0
+            return True
+
         while True:
             if deadline.expired():
                 error = "kernel wall clock exceeded after %.0fs" % deadline.elapsed()
@@ -330,9 +383,13 @@ class Pipeline:
             if mapper_rounds >= max_rounds:
                 error = "mapper round budget exhausted (%d rounds)" % mapper_rounds
                 break
-            if ii > max_ii:
-                error = "no feasible II up to max_ii=%d" % max_ii
+            if ladder_pos >= len(ladder):
+                error = "no feasible II in ladder %s" % ladder
                 break
+            ii = int(ladder[ladder_pos])
+            if ii != int(facts.get("ii") or 0):
+                facts = facts_for_ii(facts, ii)
+                job.write_json("facts.json", facts)
 
             # --- S3 place -------------------------------------------------
             run["stage"] = "S3"
@@ -352,14 +409,19 @@ class Pipeline:
                     llm_calls = len(client.records)
                 else:
                     llm_calls += 1
-                schema_retries += 1
+                buckets["placement"] += 1
                 attempts.append(
                     {"attempt": len(attempts) + 1, "ii": ii, "kind": "schema",
                      "error": str(exc)[:800]}
                 )
-                self._say("S3", "schema error #%d: %s" % (schema_retries, str(exc)[:160]))
-                if schema_retries > MAX_SCHEMA_RETRIES:
-                    error = "placer returned no valid placement json after %d re-asks" % MAX_SCHEMA_RETRIES
+                self._say("S3", "schema error #%d: %s"
+                          % (buckets["placement"], str(exc)[:160]))
+                if buckets["placement"] > BUCKET_LIMITS["placement"]:
+                    if advance_ii():
+                        feedback = None
+                        continue
+                    error = ("placer returned no valid placement json after %d attempt(s)"
+                             % buckets["placement"])
                     cdd = CDD(layer="node", root_cause=str(exc)[:300], action="abort",
                               evidence=[str(exc)[:300]], confidence=0.9)
                     break
@@ -374,6 +436,18 @@ class Pipeline:
                 error = "S3 llm: %s" % exc
                 self._say("S3", "FAILED %s" % exc)
                 break
+            except GreedyError as exc:
+                buckets["placement"] += 1
+                attempts.append(
+                    {"attempt": len(attempts) + 1, "ii": ii, "kind": "greedy",
+                     "error": str(exc)[:400]}
+                )
+                self._say("S3", "greedy placement failed at II=%d: %s" % (ii, str(exc)[:160]))
+                if advance_ii():
+                    feedback = None
+                    continue
+                error = "greedy placer could not place the graph: %s" % exc
+                break
 
             llm_calls = len(client.records) if client is not None else llm_calls + 1
             previous = placement.to_dict()
@@ -381,7 +455,7 @@ class Pipeline:
                 {"node": p.node, "x": p.x, "y": p.y, "t": p.t} for p in placement.pins
             ]
             complete = len({p["node"] for p in pins}) == facts["n_nodes"]
-            pins_mode = 1 if complete else 3
+            pins_mode = self.pins_mode if self.pins_mode is not None else (1 if complete else 3)
             record: Dict[str, Any] = {
                 "attempt": len(attempts) + 1,
                 "kind": "placement",
@@ -408,25 +482,21 @@ class Pipeline:
             }
             if val["errors"]:
                 attempts.append(record)
-                validate_retries += 1
+                buckets["validate"] += 1
                 self._say(
                     "S4",
                     "rejected: %d error(s), e.g. %s"
                     % (len(val["errors"]), val["errors"][0][:140]),
                 )
-                if validate_retries <= MAX_VALIDATE_RETRIES:
+                if buckets["validate"] <= BUCKET_LIMITS["validate"]:
                     feedback = format_feedback(val)
                     continue
-                if ii < max_ii:
-                    validate_retries = 0
-                    ii += 1
-                    facts = facts_for_ii(facts, ii)
-                    job.write_json("facts.json", facts)
-                    run["ii"]["final"] = ii
+                if advance_ii():
                     feedback = None
-                    self._say("S4", "raising II to %d after repeated placement rejections" % ii)
+                    self._say("S4", "II raised to %d after repeated placement rejections"
+                              % ladder[ladder_pos])
                     continue
-                error = "placement rejected by the validator after %d re-asks" % MAX_VALIDATE_RETRIES
+                error = "placement rejected by the validator after %d re-asks" % buckets["validate"]
                 cdd = CDD(layer="node", root_cause=val["errors"][0][:300],
                           action="repin", evidence=val["errors"][:5], confidence=0.8)
                 break
@@ -444,17 +514,14 @@ class Pipeline:
             last_pins = job.read_json(pins_path)
             last_map_job = map_job
             try:
-                out = run_mapper(
-                    map_job,
-                    repo_root=self.repo_root,
+                router.timeout = deadline.clamp(mapper_timeout)
+                out = router.route(
+                    job=map_job,
                     dfg=dfg.dfg,
                     arch=dfg.arch,
-                    xdim=xdim,
-                    ydim=ydim,
                     ii=ii,
                     pins=pins_path,
                     pins_mode=pins_mode,
-                    timeout=deadline.clamp(mapper_timeout),
                 )
             except ToolError as exc:
                 error = "S5 mapper: %s" % exc
@@ -463,15 +530,16 @@ class Pipeline:
             record["map"] = _map_summary(out)
             if not out.report.ok:
                 attempts.append(record)
-                map_retries += 1
+                bucket = "placement" if out.report.stage == "placement" else "route"
+                buckets[bucket] += 1
                 self._say(
                     "S5",
                     "FAILED stage=%s pins %d/%d: %s"
                     % (out.report.stage, out.report.pins_applied, out.report.pins_total,
                        (out.report.error or "")[:160]),
                 )
-                if map_retries <= MAX_MAP_RETRIES:
-                    if out.report.stage == "placement":
+                if buckets[bucket] <= BUCKET_LIMITS[bucket]:
+                    if bucket == "placement":
                         feedback = (
                             "The mapper rejected the placement at its placement stage: %s\n"
                             "Pins are applied one node at a time in scheduler order; a pin on a "
@@ -487,20 +555,15 @@ class Pipeline:
                             "to the manhattan distance." % (ii, (out.report.error or "")[:500])
                         )
                     continue
-                if ii < max_ii:
-                    ii += 1
-                    map_retries = 0
-                    validate_retries = 0
-                    facts = facts_for_ii(facts, ii)
-                    job.write_json("facts.json", facts)
-                    run["ii"]["final"] = ii
+                if advance_ii():
                     feedback = (
-                        "Routing kept failing at the previous II, so the agent must now place "
-                        "the graph for II=%d: phases t in 0..%d." % (ii, ii - 1)
+                        "Routing kept failing at II=%d, so the agent must now place "
+                        "the graph for II=%d: phases t in 0..%d."
+                        % (ii, ladder[ladder_pos], ladder[ladder_pos] - 1)
                     )
-                    self._say("S5", "raising II to %d after mapper failures" % ii)
+                    self._say("S5", "II raised to %d after mapper failures" % ladder[ladder_pos])
                     continue
-                error = "mapper failed after %d re-placement(s)" % MAX_MAP_RETRIES
+                error = "mapper failed after %d re-placement(s)" % buckets[bucket]
                 cdd = CDD(layer="edge", root_cause=(out.report.error or "")[:300],
                           action="reroute", evidence=[out.report.error or ""], confidence=0.7)
                 break
@@ -513,37 +576,41 @@ class Pipeline:
 
             # --- S6 sim ---------------------------------------------------
             run["stage"] = "S6"
-            traces = find_traces(self.repo_root, self.kernel, cfg, self.trace_arg)
-            if not traces:
+            try:
+                trace_path, trace_tier = resolve_trace(
+                    self.repo_root, self.kernel, cfg, self.trace_arg)
+            except TraceNotFound as exc:
+                sim_summary = {"skipped": "no trace", "tier": "none",
+                               "evidence": str(exc)[:600]}
+                last_sim = sim_summary
+                record["sim"] = sim_summary
+                attempts.append(record)
                 run["result"] = {
                     "ii": out.report.ii,
                     "lat": out.report.lat,
                     "binary_sha256": out.binary_sha256,
+                    "sim": "skipped(no trace)",
                 }
-                status = "unverified"
-                error = "mapping succeeded but no instrumentation trace exists for %s" % self.kernel
-                attempts.append(record)
-                self._say("S6", "SKIPPED: %s" % error)
+                status = "ok"
+                self._say("S6", "SKIPPED (no trace): %s" % str(exc)[:140])
                 break
             sim_job = job.dir("sim-%02d" % mapper_rounds)
-            sim_results = []
-            last_log = ""
-            for trace in traces[:4]:
-                sim = run_sim(
-                    sim_job,
-                    repo_root=self.repo_root,
-                    binary=out.binary,
-                    trace=trace,
-                    mem_alloc=dfg.mem_alloc,
-                    xdim=xdim,
-                    ydim=ydim,
-                    timeout=deadline.clamp(120),
-                    log_name="sim-%s.log" % os.path.basename(trace).replace(".txt", ""),
-                )
-                sim_results.append(sim.result)
-                if sim.log:
-                    last_log = sim.log
-            sim_summary = _sim_summary(sim_results, traces)
+            sim = run_sim(
+                sim_job,
+                repo_root=self.repo_root,
+                binary=out.binary,
+                trace=trace_path,
+                mem_alloc=dfg.mem_alloc,
+                xdim=xdim,
+                ydim=ydim,
+                timeout=deadline.clamp(120),
+                log_name="sim-%s.log" % os.path.basename(trace_path).replace(".txt", ""),
+            )
+            sim_results = [sim.result]
+            last_log = sim.log or ""
+            sim_summary = _sim_summary(sim_results, [trace_path])
+            sim_summary["trace"] = os.path.basename(trace_path)
+            sim_summary["tier"] = trace_tier
             last_sim = sim_summary
             last_sim_log = last_log
             record["sim"] = sim_summary
@@ -557,6 +624,7 @@ class Pipeline:
                     "mismatches": sim_summary["mismatches"],
                     "cycles": sim_summary["cycles"],
                     "binary_sha256": out.binary_sha256,
+                    "sim": "verified",
                 }
                 self._say(
                     "S6",
@@ -565,7 +633,7 @@ class Pipeline:
                 )
                 break
 
-            sim_retries += 1
+            buckets["sim"] += 1
             self._say("S6", "sim FAILED %s" % (sim_summary.get("evidence") or "")[:160])
             cdd = CDD(
                 layer="node",
@@ -574,7 +642,7 @@ class Pipeline:
                 evidence=[sim_summary.get("evidence") or ""],
                 confidence=0.75,
             )
-            if sim_retries <= MAX_SIM_RETRIES:
+            if buckets["sim"] <= BUCKET_LIMITS["sim"]:
                 feedback = (
                     "The mapping routed and the simulator ran, but %d address(es) held the "
                     "wrong value (%s). A mismatch is almost always a phase error: a value "
@@ -583,8 +651,12 @@ class Pipeline:
                     "distance as phase margin." % (sim_summary["mismatches"], sim_summary.get("evidence") or "")
                 )
                 continue
+            if advance_ii():
+                feedback = "Placement for II=%d (phases 0..%d) after a simulator mismatch." % (
+                    ladder[ladder_pos], ladder[ladder_pos] - 1)
+                continue
             error = "simulation mismatched %d address(es) after %d re-placement(s)" % (
-                sim_summary["mismatches"], MAX_SIM_RETRIES)
+                sim_summary["mismatches"], buckets["sim"])
             break
 
         # S9 report ---------------------------------------------------------

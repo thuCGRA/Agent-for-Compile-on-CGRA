@@ -40,10 +40,13 @@ def _summary(out: RunOutcome) -> str:
            res.get("lat") or "-")
     )
     if out.status == "ok":
-        lines.append(
-            "verified: Matches::%s Mismatches::%s cycles=%s"
-            % (res.get("matches"), res.get("mismatches"), res.get("cycles"))
-        )
+        if res.get("sim") == "skipped(no trace)":
+            lines.append("mapped, simulation skipped: no trace for this kernel")
+        else:
+            lines.append(
+                "verified: Matches::%s Mismatches::%s cycles=%s"
+                % (res.get("matches"), res.get("mismatches"), res.get("cycles"))
+            )
     elif out.status == "unverified":
         lines.append("mapped but not verified: %s" % (r.get("error") or ""))
     else:
@@ -70,6 +73,8 @@ def cmd_run(args) -> int:
         kernel_walltime_s=args.walltime_s,
         trace=args.trace,
         pins_file=args.pins_file,
+        placer=args.placer,
+        pins_mode=args.pins_mode,
         base_url=args.base_url,
         api_key=args.api_key,
         model=args.model,
@@ -147,13 +152,26 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--arm", default="A", choices=["A"])
     r.add_argument("--kernel", default="array_add")
     r.add_argument("--seed", type=int, default=0)
-    r.add_argument("--ii", type=int, default=None, help="start II (default: init_ii in config)")
+    r.add_argument("--ii", type=int, default=None, help="run only this II (overrides the ladder)")
     r.add_argument("--out-root", default="work/armA")
     r.add_argument("--max-llm-calls", type=int, default=None)
     r.add_argument("--mapper-timeout-s", type=float, default=None)
     r.add_argument("--walltime-s", type=float, default=None)
     r.add_argument("--trace", default=None, help="a trace file or a directory of traces")
     r.add_argument("--pins-file", default=None, help="replay this pins.json instead of calling an LLM")
+    r.add_argument(
+        "--placer",
+        default="llm",
+        choices=["llm", "greedy", "fixed"],
+        help="llm = arm A; greedy/fixed are evaluation references, not the arm itself",
+    )
+    r.add_argument(
+        "--pins-mode",
+        type=int,
+        default=None,
+        choices=[1, 2, 3],
+        help="force mapper pins mode (default: 1 when every node is pinned, else 3)",
+    )
     r.add_argument("--base-url", default=None)
     r.add_argument("--api-key", default=None)
     r.add_argument("--model", default=None)

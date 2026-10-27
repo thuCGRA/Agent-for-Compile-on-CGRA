@@ -23,19 +23,22 @@ with t in [0, II).
 Hard rules that make a placement illegal:
  R1 every node gets exactly one pin, and no (PE, phase) pair may hold two nodes;
  R2 a node's op must be supported by the target PE; LOAD/STORE only on memory PEs;
- R3 a value produced by a parent must be consumable by the child: the phase \
-distance from parent to child, minus nextiter*II, must be at least the number of \
-hops between the two PEs (each hop costs one cycle);
+ R3 a value produced by a parent must be consumable by the child: on the cyclic \
+schedule, (t_child - t_parent - nextiter*II) mod II must be at least the producer's \
+latency (1 cycle for ALU ops, 2 for LOAD/STORE). The PE distance is NOT part of this \
+bound;
  R4 x in [0, xdim), y in [0, ydim), t in [0, II);
  R5 a LOAD/STORE should sit on a memory PE whose bank holds the variable it reaches; \
 the facts list which variables belong to which bank;
  R6 SELECT must not receive two operands in the same cycle: keep the phases of its \
 two parents different.
 
-Routability, not legality, is what usually fails: the router moves one hop per cycle \
-and cannot jump, so an edge whose PEs are |dx|+|dy| apart needs that many cycles of \
-phase difference. Give it exactly that. Lay each dependency chain along one row or \
-column, one hop per phase step, and keep a node and its children inside a 2x2 block.
+Crossing a PE boundary does not consume a cycle: HyCUBE forwards combinationally within \
+a cycle, so jump count is not a scheduling constraint; the PathFinder router inserts \
+detours afterwards. What does hurt is port pressure: long detours, many edges entering \
+one PE in the same cycle, and edges with zero slack. Give each dependency enough slack \
+(t_child - t_parent - nextiter*II), keep chains mostly along a row or column, and prefer \
+short distances between a node and its children.
 
 Answer with one json object and nothing else."""
 
@@ -74,12 +77,14 @@ def build_messages(
  - Memory operations (LOAD/LOADB/LOADH/LOADCL/STORE/STOREB/STOREH) must be placed on a \
 memory PE: %(mempes)s. %(banks)s
  - Two nodes must not share the same (x, y, t).
- - For an edge parent -> child use (t_child - t_parent - nextiter*II) mod II >= number \
-of hops between the two PEs. Same PE or adjacent PE needs one phase step.
+ - For an edge parent -> child: (t_child - t_parent - nextiter*II) mod II >= the parent's \
+latency (1 for ALU ops, 2 for LOAD/STORE). Jump distance is not part of the legality \
+check.
  - For SELECT give its two parents different phases: the hardware must not see both \
 operands in one cycle.
- - Locality decides routability: keep hops = |dx| + |dy| <= II-1 = %(budget)d, and make \
-the phase difference (minus nextiter*II) as close to hops as possible.
+ - Locality decides routability, not legality: keep hops = |dx| + |dy| small (a good \
+target is <= II-1 = %(budget)d), give dependencies slack, and avoid many edges entering \
+the same PE in the same phase.
  - Start each chain at a memory PE (x=0) and march RIGHTWARDS, one column per phase \
 step: (0,y,t) feeds (1,y,t+1), which feeds (2,y,t+2), which feeds (3,y,t+3).
  - %(nnodes)d nodes need at least %(minpes)d PEs; do not pile the whole graph onto one \
