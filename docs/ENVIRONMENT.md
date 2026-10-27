@@ -3,7 +3,7 @@
 > 状态：**已在 WSL 上从零复现并跑通端到端冒烟**（DFG → bank 架构 → 映射 → 仿真，387 向量零失配）。
 > 记录时间：2026-10-26，机器：WSL2 Ubuntu 24.04，Python 3.12.3，conda 26.1.1。
 
-本文只写"怎么做"和"为什么这么做"。规划层面的取舍见 [ENGINEERING_PLAN.md](ENGINEERING_PLAN.md)，环境相关的决策见 [DECISIONS.md](DECISIONS.md)。
+本文只写“怎么做”和“为什么这么做”。整体方案见 [WORKFLOW.md](WORKFLOW.md) 与 [PLAN.md](PLAN.md)。
 
 ## 1. 一次性安装
 

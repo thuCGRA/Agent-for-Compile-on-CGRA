@@ -1,0 +1,17 @@
+kernel: array_add
+# LLVM 段固定参数（每 kernel 一份，不经 LLM）
+c_source: benchmarks/array_add/array_add.c
+function: array_add
+xdim: 4
+ydim: 4
+numberofbanks: 2
+banksize: 2048
+dfg_type: PartPred
+init_ii: 1
+max_ii: 8
+
+# 线程与预算
+mapper_timeout_s: 600
+kernel_walltime_s: 1200
+max_rounds: 4
+max_llm_calls: 12
