@@ -310,6 +310,38 @@ II=4 lat=14（`-m 0` 基线 lat=13）。所以 gemm 的 `—` 现在应读作「
   （两条指令抢同一 PE 槽）。II=5 时同一 kernel 能 167/0 通过（见 §2.7），属工具链/映射器问题，
   不计入任何一臂的错误率。
 
+## 2.10 廉价预测器基线：纯规则放置能追到多近（10 kernel × II=4）
+
+`placers/rule.py`（纯规则、无搜索、毫秒级）：`t = ASAP % II`；LOAD/STORE 钉到所属 bank
+的 memory PE（未接线时按 bank 顺序映射）；其余按 op 兼容 + 父邻居就近，冲突按度数降序重排。
+脚本 `scripts/eval_rule.py`，数据 `work/eval-rule/rules.csv`。
+
+| kernel | 规则放置耗时 | strict | strict_accept | strict II/lat | mapper 时间 | none II/lat | lat 差 |
+|---|---|---|---|---|---|---|---|
+| array_add | 0.1 ms | fail | 600/20 | 4/— | 77.74 s | 4/11 |  |
+| array_cond | 0.2 ms | ok | 200/25 | 4/18 | 32.06 s | 4/13 | +5 |
+| conv2d | 0.3 ms | fail | 0/39 | —/— | 89.09 s | 4/15 |  |
+| conv3 | 0.2 ms | ok | 84/28 | 4/18 | 9.5 s | 4/13 | +5 |
+| gemm | 0.2 ms | fail | 20/26 | 4/— | 4.55 s | 4/13 |  |
+| gemm_pace | 0.2 ms | fail | 43/49 | 9/— | 22.58 s | 9/13 |  |
+| hpcg | 0.1 ms | fail | 0/24 | —/— | 88.57 s | 4/11 |  |
+| mac | 0.2 ms | fail | 0/22 | —/— | 88.48 s | 4/10 |  |
+| mults1 | 0.3 ms | fail | 0/25 | —/— | 88.51 s | 4/16 |  |
+| trmm | 0.1 ms | ok | 22/11 | 4/9 | 4.55 s | 4/6 | +3 |
+
+读法（对照 §2.9 的 `none`）：
+- **规则放置本身 0.1–0.3 ms**，比 mapper 整条 map 快到可以忽略；这是它唯一赢项。
+- **strict 只有 3/10 通过**，且通过的三个 lat 全面更差：array_cond +5、conv3 +5、trmm +3。
+  其余 7 个：gemm 20/26 被拒、gemm_pace 43/49 被拒、hpcg/conv2d/mac/mults1 在 90s 超时
+  （mapper 在错误 pin 上反复迭代），array_add 600/20 全 tired 后失败。
+- **失败原因不是"坐标算不出来"，而是"坐标没有依赖语义"**：`t = ASAP % II` 不看父节点延迟，
+  子节点可能被钉在父节点延迟未满足的相位；mapper 的 DP 拒绝这类 pin，修不了就迭代到超时。
+  换句话说：**从 DFG 到坐标这一步本身有难度（要素是延迟与相位余量），纯拓扑规则抓不住**。
+- 按父代理的判读标准：lat 明显差（+3~+5）+ 大量失败 → **LLM 有真实空间**，且空间不在
+  "选度数高的节点"，而在"给节点算一个能同时满足延迟/端口/资源的相位与位置"。
+- `strict_accept` 里 `applied` 是 mapper 的累计尝试数（含迭代重试），可能大于 `total`；
+  对比时只看"是否 ok"和失败阶段。
+
 ## 3. 管线与设计决策
 
 ```

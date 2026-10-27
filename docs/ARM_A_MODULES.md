@@ -129,6 +129,12 @@ ad-hoc shell 脚本放在 `/home/steve/cac_scripts/armA/`（`cac_scripts/` 根�
 `toolchain/build.sh` 就会得到带 `--dump-placement` 的 mapper；`scripts/gen_mapper_patch.py`
 从当前 vendor 树反推并自测（应用到「0002 已打」的树上、与当前树逐字节一致）。
 
+
+
+**补丁自测规矩**：新增或修改 `toolchain/patches/` 下的任何补丁，都先跑
+`scripts/gen_mapper_patch.py`（或等价的反推自测）确认 `patch -p1` 打到「前置补丁已打」的
+树上与当前 vendor 树逐字节一致（`PATCH_ROUNDTRIP_OK`），再提交。复现问题不要等到合并时才发现。
+
 `scripts/patch_mapper_dump.py` 保留为「vendor 已同步但没重跑 build.sh」时的补丁工具，
 逻辑与 build.sh 相同（`patch -p1` + marker），不再做字符串插入。
 

@@ -238,7 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument(
         "--placer",
         default="llm",
-        choices=["llm", "greedy", "fixed"],
+        choices=["llm", "greedy", "rule", "fixed"],
         help="llm = arm A; greedy/fixed are evaluation references, not the arm itself",
     )
     r.add_argument(
@@ -290,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     e.add_argument("--dfg", required=True, help="PartPred DFG xml")
     e.add_argument("--arch", required=True, help="arch JSON (xdim/ydim come from here)")
-    e.add_argument("--placer", default="greedy", choices=["llm", "greedy", "fixed"])
+    e.add_argument("--placer", default="greedy", choices=["llm", "greedy", "rule", "fixed"])
     e.add_argument("--seed", type=int, default=0)
     e.add_argument("--ii", type=int, default=None, help="target II (default 4, floored at ResMin)")
     e.add_argument(

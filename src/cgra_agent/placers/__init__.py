@@ -5,6 +5,7 @@ feedback=..., previous=...) -> Placement``）。每个臂放自己的实现：
 
     A 臂   placers/llm.py       （LLM 产布局；本仓库的臂实现）
     A 臂   placers/greedy.py    （参考布局，只用于评测/消融，不是臂）
+    A 臂   placers/rule.py      （廉价规则基线：无搜索，毫秒级）
     A 臂   placers/fixed.py     （回放 pins.json）
     B 臂   placers/sa.py        （合并时放在这里，注册进 ``_PLACERS``）
 
@@ -23,6 +24,7 @@ from .llm import LLMPlacer
 _PLACERS = {
     "llm": "llm",        # A 臂
     "greedy": "greedy",  # 参考布局
+    "rule": "rule",      # 廉价规则基线（无搜索）
     "fixed": "fixed",    # 回放 pins.json
 }
 
@@ -41,6 +43,10 @@ def make_placer(
         raise ValueError("unknown placer %r (known: %s)" % (kind, ", ".join(sorted(_PLACERS))))
     if kind == "greedy":
         return GreedyPlacer(seed=seed)
+    if kind == "rule":
+        from .rule import RulePlacer
+
+        return RulePlacer()
     if kind == "fixed":
         if not pins_file:
             raise ValueError("placer=fixed needs a pins file")
