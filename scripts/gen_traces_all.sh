@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate instrumentation traces for every mapped kernel that has a config.
 set -uo pipefail
-cd /home/steve/cac-armA
+cd /home/steve/CGRA_Agent_Compiler
 mkdir -p work/traces/logs
 PY=/home/steve/miniconda3/envs/cgra/bin/python
 MAP=$(/home/steve/miniconda3/envs/cgra-tc/bin/opt 2>/dev/null; true)
@@ -16,7 +16,7 @@ print(c["c_source"], c.get("function") or "main", c.get("numberofbanks") or 2,
 PYEOF
 )
     [ -z "$src" ] && { echo "SKIP $k (no c_source)"; continue; }
-    src_abs="/home/steve/cac-armA/$src"
+    src_abs="/home/steve/CGRA_Agent_Compiler/$src"
     [ -f "$src_abs" ] || { echo "SKIP $k (missing $src)"; continue; }
     echo "== $k ($func, $src)"
     bash scripts/gen_trace.sh "$k" "$src_abs" "$func" "$banks" "$bs" \

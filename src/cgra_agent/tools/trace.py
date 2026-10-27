@@ -27,18 +27,16 @@ TRACE_DIRS = (
     "work/smoke",
 )
 TRACE_DIRS_BY_KERNEL = (
+    "work/traces/{kernel}",
     "toolchain/vendor/dfggen/benchmarks/morpher_benchmarks/{kernel}/memtraces",
     "toolchain/vendor/dfggen/benchmarks/woset_benchmarks/{kernel}/memtraces",
 )
 
 GENERATION_HINT = (
-    "no {kernel}_trace_*.txt found. Generating one requires instrumenting the "
-    "32-bit binary (clang -target i386 + llvm-link from the cgra-tc env) and "
-    "running it, i.e. the i386 runtime: install 'gcc-multilib libc6-dev-i386' "
-    "on the host. That package is absent and sudo is not available here, so "
-    "trace generation is blocked at the machine level, not in the pipeline. "
-    "Until then: pass --trace <file>, or point 'memtraces:' in "
-    "configs/{kernel}.yaml at an existing trace."
+    "no {kernel}_trace_*.txt found. Generate it with scripts/gen_trace.sh "
+    "(needs gcc-multilib + libc6-dev-i386, now installed), or pass "
+    "--trace <file|dir>.  Traces produced by the batch script land in "
+    "work/traces/{kernel}/."
 )
 
 
@@ -78,8 +76,12 @@ def find_traces(
         else:
             explicit.extend(str(p) for p in cfg_traces)
     for raw in explicit:
-        for path in _expand(raw, repo_root):
-            if os.path.isfile(path) and path not in out:
+        cands = [p for p in _expand(raw, repo_root) if os.path.isfile(p)]
+        # A directory argument often also holds mapper/simulator logs; only
+        # accept real trace fixtures when any are present.
+        named = [p for p in cands if _is_trace(p, kernel)]
+        for path in (named or cands):
+            if path not in out:
                 out.append(path)
 
     for rel in TRACE_DIRS:

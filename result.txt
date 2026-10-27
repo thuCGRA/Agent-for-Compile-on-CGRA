@@ -30,3 +30,23 @@
  /home/steve/CGRA_Agent_Compiler/work/kernels/mac/dfg.xml method:LLM 4 2
  /home/steve/CGRA_Agent_Compiler/work/kernels/mults1/dfg.xml method:LLM 4 5
  /home/steve/CGRA_Agent_Compiler/work/kernels/trmm/dfg.xml method:LLM 4 0
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_add/dfg.xml method:LLM 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_cond/dfg.xml method:LLM 4 3
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv2d/dfg.xml method:LLM 4 3
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv3/dfg.xml method:LLM 4 3
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm/dfg.xml method:LLM 4 7
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm_pace/dfg.xml method:LLM 9 24
+ /home/steve/CGRA_Agent_Compiler/work/kernels/hpcg/dfg.xml method:LLM 4 10
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mac/dfg.xml method:LLM 4 2
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mults1/dfg.xml method:LLM 4 4
+ /home/steve/CGRA_Agent_Compiler/work/kernels/trmm/dfg.xml method:LLM 4 0
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_add/dfg.xml method:LLM 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_cond/dfg.xml method:LLM 4 2
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv2d/dfg.xml method:LLM 4 3
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv3/dfg.xml method:LLM 4 2
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm/dfg.xml method:LLM 4 6
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm_pace/dfg.xml method:LLM 9 22
+ /home/steve/CGRA_Agent_Compiler/work/kernels/hpcg/dfg.xml method:LLM 4 9
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mac/dfg.xml method:LLM 4 2
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mults1/dfg.xml method:LLM 4 4
+ /home/steve/CGRA_Agent_Compiler/work/kernels/trmm/dfg.xml method:LLM 4 0

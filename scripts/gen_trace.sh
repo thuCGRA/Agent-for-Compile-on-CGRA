@@ -16,9 +16,9 @@ SRC=${2:?absolute source .c}
 FUNC=${3:-main}
 BANKS=${4:-2}
 BS=${5:-2048}
-OUTROOT=${6:-/home/steve/cac-armA/work/traces}
+OUTROOT=${6:-/home/steve/CGRA_Agent_Compiler/work/traces}
 
-REPO=/home/steve/cac-armA
+REPO=/home/steve/CGRA_Agent_Compiler
 PASS=$REPO/toolchain/out/libdfggenPass.so
 TC=/home/steve/miniconda3/envs/cgra-tc/bin
 CXX=${CXX:-g++}
