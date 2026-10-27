@@ -23,11 +23,12 @@ CXX="$ROOT/toolchain/bin/clang++"
 
 apply_patch() {
   local dir="$1" p="$2"
+  local marker="$dir/.$(basename "$p").applied"
   [ -f "$p" ] || { echo "  (无 patch) $p"; return 0; }
-  if [ -f "$dir/.patch-applied" ]; then echo "  已应用 $(basename "$p")"; return 0; fi
+  if [ -f "$marker" ]; then echo "  已应用 $(basename "$p")"; return 0; fi
   echo "  应用 $(basename "$p")"
   ( cd "$dir" && patch -p1 -N --no-backup-if-mismatch < "$p" ) || return 1
-  touch "$dir/.patch-applied"
+  touch "$marker"
 }
 echo "== LLVM $(llvm-config --version)  rtti=$(llvm-config --has-rtti)  cxx=$CXX"
 
@@ -59,6 +60,7 @@ fi
 HOSTFLAGS="-B/usr/bin -O2"
 echo "== [2/3] mapper"
 apply_patch "$ROOT/toolchain/vendor/mapper" "$ROOT/toolchain/patches/0002-mapper.patch"
+apply_patch "$ROOT/toolchain/vendor/mapper" "$ROOT/toolchain/patches/0004-mapper-dump.patch"
 cmake -S "$ROOT/toolchain/vendor/mapper" -B "$BUILD/mapper" -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER="$GCC" -DCMAKE_CXX_COMPILER="$GXX" \
   -DCMAKE_C_FLAGS="$HOSTFLAGS" -DCMAKE_CXX_FLAGS="$HOSTFLAGS" > "$BUILD/mapper-config.log" 2>&1 || { tail -30 "$BUILD/mapper-config.log"; exit 5; }

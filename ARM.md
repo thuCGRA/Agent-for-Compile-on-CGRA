@@ -274,6 +274,42 @@ trace 打通后（§7），对每种成功映射都跑了仿真（`work/simv/<k>
 II=4 lat=14（`-m 0` 基线 lat=13）。所以 gemm 的 `—` 现在应读作「可放置，但 strict 全 pin
 不可行」，不再读作「放不出」。
 
+## 2.9 总表：pin 到底买到了什么（10 kernel）
+
+数据 `work/master_table.csv`（`scripts/master_table.py` 生成）。`none` = `-m 0`；
+`oracle` = mapper 自己 `-m 0` 的最终放置（`--dump-placement`，按 `t = lat % II` 转 pin）回灌 strict
+（`--pins_mode 1`）；`memory` = 只钉该放置里的 LOAD*/STORE* 节点；`memory repair` 同样只钉内存节点但
+用 `--pins_mode 3`。`accept` = pins_applied/pins_total。
+
+| kernel | none: II/lat/time | oracle: accept, II/lat | memory strict: accept | memory repair: accept, II/lat/time | sim |
+|---|---|---|---|---|---|
+| array_add | 4/11/0.91s | 20/20, 4/11 | 1/6 | 6/6, 4/11/0.91s | verified 387/0 |
+| array_cond | 4/13/1.55s | 25/25, 4/13 | 1/6 | 6/6, 4/13/1.53s | verified 243/0 |
+| conv2d | 4/15/2.08s | 39/39, 4/15 | 1/8 | 8/8, 4/15/2.13s | verified 523/0 |
+| conv3 | 4/13/1.38s | 28/28, 4/13 | 1/7 | 7/7, 4/13/1.34s | verified 163/0 |
+| gemm | 4/13/3.19s | 26/26, 4/13 | 1/7 | 7/7, 4/13/3.51s | verified 783/0 |
+| gemm_pace | 9/13/12.06s | 49/49, 9/13 | 1/7 | 7/7, 9/13/12.61s | verified 723/0 |
+| hpcg | 4/11/5.32s | 24/24, 4/11 | 1/5 | 5/5, 4/11/5.17s | unverified 90/1 |
+| mac | 4/10/1.29s | 22/22, 4/10 | 1/5 | 5/5, 4/10/1.32s | sim-crash (toolchain) |
+| mults1 | 4/16/2.59s | 25/25, 4/16 | 1/4 | 4/4, 4/16/2.57s | unverified 79/8 |
+| trmm | 4/6/0.43s | 11/11, 4/6 | 1/3 | 3/3, 4/6/0.41s | verified 5/0 |
+
+读法：
+- **oracle 与 none 的 II/lat/时间逐项相同**：这是必然的（oracle 就是 mapper 自己的解），
+  它说明「全量 pin 的价值上限 = 0」——要证明 pin 有用，必须拿出比 mapper 自己更好的解，
+  而不是把它的解喂回去。
+- **memory strict 全部 1/N 失败**：只钉内存节点也会让 strict 无解，因为未钉节点的 DP 扩展
+  与钉住的位置冲突。**这是第三层约束（DP 候选集）的又一次实证**，而且发生在「最该有用」的节点上。
+- **memory repair 10/10 接受、II/lat/时间与 none 持平**：这是「选择性 pin」的第一个正证据——
+  选有结构含义的节点（内存节点位置本来被 bank 绑死），代价接近零；比按 degree/critical 排序选点
+  更可能成立。
+- **hpcg、mults1 标 unverified**：trace 是整程序的数组快照，DFG 只覆盖最内层循环（hpcg 的
+  `please_map_me` 在内层 j 循环里，mults1 的循环体是 i=1..18），两者循环体边界不对齐；
+  90/1 与 79/8 的失配是 trace 生成方式造成的，不是布局相位错。**不计入 pass**。
+- **mac 标 sim-crash（toolchain）**：II=4 下 simulator 断言 `!(I1isvalid && I2isvalid)` 崩溃
+  （两条指令抢同一 PE 槽）。II=5 时同一 kernel 能 167/0 通过（见 §2.7），属工具链/映射器问题，
+  不计入任何一臂的错误率。
+
 ## 3. 管线与设计决策
 
 ```
@@ -357,6 +393,17 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
 12. **时间戳 bundle 不是唯一副本**：`work/armA/<k>/<ts>/` 下 dfg/ 与 bitstream 可能被其它臂的
     探针覆盖（同 DFG 同 II 但映射有随机性）。稳定输入与评测口径用 `work/kernels/<k>/`
     （`scripts/export_kernels.py` 生成），时间戳 bundle 只作调试。
+
+13. **`validate()` 通过 ≠ mapper 能实现，两个方向都会错**。三层约束已各出现一次：
+
+    | 案例 | 谁更严 | 现象 | 后果 |
+    |---|---|---|---|
+    | R3 相位差 | 我们过严 | 误杀合法布线 | 已降级为 warning |
+    | gemm 贪心 | 我们搜索不完备 | 误报不可放 | 改 `placement_not_found` + 回溯 |
+    | DP 候选集 | mapper 更严 | strict 拒合法 pin | 全量 pin 在 strict 下不可行 |
+
+    直接结论：**全量 pin 是错的工作点**——strict 会被 DP 候选拒，repair 牺牲 lat，时间还翻倍。
+    对 B 的口径：`oracle pins` 只能用 mapper 自己的放置，且它不带来 II/lat 收益（见 §2.9）。
 
 ## 5. benchmark 集合（替换 md/stencil/spmv）
 

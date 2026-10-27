@@ -1,0 +1,69 @@
+--- a/include/morpher/util/util.h
++++ b/include/morpher/util/util.h
+@@ -50,6 +50,7 @@
+ 	std::string pins_file = "";   // placement hint produced by the llm agent
+ 	int pins_mode = 0;             // 0 off, 1 strict, 2 prefer
+ 	std::string report_file = ""; // machine readable result
++	std::string dump_placement_file = ""; // optional: dump final placement (any method)
+ 	lisa_arguments lisa_arg;
+ };
+ 
+@@ -152,6 +153,7 @@
+         .add_option<std::string>("", "--pins", "pins json (llm placement)", "")
+         .add_option<int>("", "--pins_mode", "0=off,1=strict,2=prefer", 0)
+         .add_option<std::string>("", "--report", "machine readable report json", "")
++        .add_option<std::string>("", "--dump-placement", "dump final placement json", "")
+         .parse(argn, argc);
+ 
+ 	ret.dfg_filename = args.get_option<std::string>("--dfg");
+@@ -174,6 +176,7 @@
+ 	ret.pins_file = args.get_option<std::string>("--pins");
+ 	ret.pins_mode = args.get_option<int>("--pins_mode");
+ 	ret.report_file = args.get_option<std::string>("--report");
++	ret.dump_placement_file = args.get_option<std::string>("--dump-placement");
+ 	ret.arch_name = args.get_option<std::string>("--arch_name");
+ 	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");
+ 	lisa_arg.training = args.get_option<bool>("--lisa_training");
+--- a/src/CGRA_xml_compiler.cpp
++++ b/src/CGRA_xml_compiler.cpp
+@@ -249,6 +249,40 @@
+ 				mapper->printHyCUBEBinary(tempCGRA);
+ 			}
+ 
++			if (!args.dump_placement_file.empty())
++			{
++				nlohmann::json rep;
++				rep["ok"] = true;
++				rep["ii"] = II;
++				rep["mapping_method"] = mapper->getMappingMethodName();
++				nlohmann::json placement = nlohmann::json::array();
++				for (DFGNode &n : tempDFG.nodeList)
++				{
++					if (n.rootDP == NULL)
++						continue;
++					PE *pe = n.rootDP->getPE();
++					nlohmann::json e;
++					e["node"] = n.idx;
++					e["op"] = n.op;
++					e["x"] = pe->X;
++					e["y"] = pe->Y;
++					e["t"] = pe->T;
++					e["lat"] = n.rootDP->getLat();
++					placement.push_back(e);
++				}
++				rep["placement"] = placement;
++				std::ofstream dump(args.dump_placement_file.c_str());
++				if (dump.is_open())
++				{
++					dump << rep.dump(2) << "\n";
++					dump.close();
++					std::cout << "[dump] placement -> " << args.dump_placement_file << "\n";
++				}
++				else
++				{
++					std::cerr << "[dump] cannot write " << args.dump_placement_file << "\n";
++				}
++			}
+ 		
+ 			
+ 			break;

@@ -123,6 +123,15 @@ ad-hoc shell 脚本放在 `/home/steve/cac_scripts/armA/`（`cac_scripts/` 根�
 时间戳 bundle 只用于调试，**B 读输入一律用 `work/kernels/`**；evaluation 产物以这里为准。
 
 ## 7. vendor 补丁（不在 git 里）
+现在这份能力有规范形式：**`toolchain/patches/0004-mapper-dump.patch`**，由
+`toolchain/build.sh` 在 `0002-mapper.patch` 之后用同一个 `apply_patch` 流程应用
+（marker 改为 `.<patch 名>.applied`，避免一个目录只能打一个补丁）。干净 vendor 上跑一遍
+`toolchain/build.sh` 就会得到带 `--dump-placement` 的 mapper；`scripts/gen_mapper_patch.py`
+从当前 vendor 树反推并自测（应用到「0002 已打」的树上、与当前树逐字节一致）。
+
+`scripts/patch_mapper_dump.py` 保留为「vendor 已同步但没重跑 build.sh」时的补丁工具，
+逻辑与 build.sh 相同（`patch -p1` + marker），不再做字符串插入。
+
 
 `toolchain/vendor/` 整体被 gitignore。本轮给 mapper 加了 `--dump-placement`（诊断用），
 源码改动不随仓库走：
