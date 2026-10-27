@@ -181,3 +181,19 @@ TREG_RO/TREG_RI 链）。`-m 0` 产出这种解没问题，但 verify 模式下�
 对上层的意思：`mac` / `mults1` 在 II=4 下**不可 verify**（不是因为布线质量），
 要么换 II、要么只用仿真兜底，要么等 DFG 生成端把 operand 槽名补全。
 `array_add` / `conv2d` / `conv3` 不受影响。
+
+## 10. 静态模型错位清单
+
+静态 verify 与真实硬件行为不一致的全部已知实例，集中在此。每一条都是一个**建模误差**，不是 bug 修复记录。
+
+| # | 错位 | 现象 | 根因 | 处理 |
+|---|---|---|---|---|
+| 1 | R3 相位假设 | 早期把 routeInfo 的 `-T` 当作 latency 传给 pins，20 条 pin 只剩 15 条、8 个 timing 冲突 | `-T` 是**相位** `lat % II`，不是延迟；pins 只该给 `t`，延迟由 mapper 定 | `tools/ablation_fixii.py` 只传 `t`；`cac_scripts/armB/pincheck.py` 固化对照 |
+| 2 | 工具链假 ok | conv2d 的 pins 配置报 `ok=true` 但仿真失败（早期一版） | 当时的 verify 不做操作数检查，静态模型比硬件宽松 | 增加 `checkOperandExclusivity` / `checkInputExclusivity` |
+| 3 | `-T`/lat 混淆的第二个出口 | `lat` 列在 `-m 0` 与 `-m 3 --verify` 下不同（11 vs 13） | 前者是 A* 报的 lat，后者是 `max(node.lat + op_latency)`，两个量 | 文档统一口径，禁止跨表比较 |
+| 4 | `DP0_I1` vs `I1` 前缀 | `getInPort` 断言崩溃（mac/mults1） | DFG 的 `getOPtype` 返操作数槽名 `I1`，模块端口叫 `DP0_I1` | `Module::lookupInPort` 双名尝试，找不到返回 NULL（不再断言） |
+| 5 | 回放有损 | 23 条参考路线只能注入 19 条；本网格 16 格被判“端口图不可实现” | routeInfo 只给 PE 坐标序列，丢掉了端口级的复用/寄存器信息 | 报告 `routes_accepted / routes_total` + 每格 `reject_kind`，不宣称 100% 覆盖 |
+| 6 | pins 静默失效 | 不给 `--pins_mode` 时 `--pins` 被完全忽略（`pins_applied=0`），报告仍 `ok=true` | mapper 默认 `pins_mode=off` | 所有跑批显式 `--pins_mode 3`；confusion.py 已固化 |
+| 7 | SELECT 跨周期残留 | 两个操作数不同周期到达、但运行时 SELECT 在两者都仍有效的周期执行 → 仿真 abort，静态判不了 | 需要运行时谓词求值 | 仅在 ARM_B_REPAIR.md §7.1 记录为“不可静态检查” |
+
+第 5、6 条属于**接口/口径**错位而非硬件建模错位，但它们同样会伪造结论，所以一并列出。

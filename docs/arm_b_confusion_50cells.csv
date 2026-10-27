@@ -1,0 +1,51 @@
+kernel,config,edges,verify_ok,sim_ok,sim_verdict,sim_class,cell,bin_same,routes,pins,lat,verify_conflicts,reject_kind,first_msg
+array_add,pins,23,True,True,mm:0,,consistent_pass,False,0,20,3,0,,
+array_add,k25,23,True,True,mm:0,,consistent_pass,False,6,20,3,0,,
+array_add,k50,23,False,True,mm:0,,static_disagreement,False,12,20,3,1,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (2,2) to (0,"
+array_add,k100,23,False,True,mm:0,,static_disagreement,False,23,20,3,3,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (2,2) to (0,"
+array_add,rule,23,False,True,mm:0,,static_disagreement,False,22,20,3,9,pin_infeasible_op,"pin for node 11 (op=LOADB): PE (3,2,t0) has no FU that supports op LOADB"
+array_cond,pins,32,False,True,mm:0,,static_disagreement,False,0,25,3,1,operand_select,SELECT node 8 gets both operands in cycle 11 (from nodes 17 18)
+array_cond,k25,32,False,True,mm:0,,static_disagreement,False,8,25,3,1,operand_select,SELECT node 8 gets both operands in cycle 11 (from nodes 17 18)
+array_cond,k50,32,False,True,mm:0,,static_disagreement,False,16,25,3,2,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (0,2) to (1,"
+array_cond,k100,32,False,True,mm:0,,static_disagreement,False,32,25,3,5,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (2,1) to (0,"
+array_cond,rule,32,False,True,mm:0,,static_disagreement,False,32,25,3,9,pin_infeasible_op,"pin for node 14 (op=LOADB): PE (1,1,t0) has no FU that supports op LOADB"
+conv2d,pins,46,False,True,mm:0,,static_disagreement,False,0,39,3,6,port_shared,port carries the values of nodes 2 14 in the same cycle
+conv2d,k25,46,False,True,mm:0,,static_disagreement,False,12,39,3,7,port_shared,port carries the values of nodes 2 14 in the same cycle
+conv2d,k50,46,False,True,mm:0,,static_disagreement,False,23,39,3,6,port_shared,port carries the values of nodes 2 14 in the same cycle
+conv2d,k100,46,False,True,mm:0,,static_disagreement,False,46,39,3,4,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (2,1) to (0,"
+conv2d,rule,46,False,True,mm:0,,static_disagreement,False,45,39,3,22,pin_infeasible_op,"pin for node 28 (op=LOADB): PE (1,3,t0) has no FU that supports op LOADB"
+conv3,pins,32,True,True,mm:0,,consistent_pass,False,0,28,3,0,,
+conv3,k25,32,False,True,mm:0,,static_disagreement,False,8,28,3,1,port_shared,port carries the values of nodes 6 14 in the same cycle
+conv3,k50,32,False,True,mm:0,,static_disagreement,False,16,28,3,1,port_shared,port carries the values of nodes 6 14 in the same cycle
+conv3,k100,32,False,True,mm:0,,static_disagreement,False,32,28,3,4,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (2,1) to (0,"
+conv3,rule,32,False,True,mm:0,,static_disagreement,False,31,28,3,13,pin_infeasible_op,"pin for node 18 (op=LOADB): PE (2,1,t0) has no FU that supports op LOADB"
+gemm,pins,31,False,True,mm:0,,static_disagreement,False,0,26,3,2,port_name_unknown,cannot resolve the port names for this edge
+gemm,k25,31,False,True,mm:0,,static_disagreement,False,8,26,3,3,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (1,2) to (2,"
+gemm,k50,31,False,True,mm:0,,static_disagreement,False,16,26,3,4,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (1,2) to (2,"
+gemm,k100,31,False,True,mm:0,,static_disagreement,False,29,26,3,6,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (1,2) to (2,"
+gemm,rule,31,False,True,mm:0,,static_disagreement,False,30,26,3,12,pin_infeasible_op,"pin for node 18 (op=LOADB): PE (2,1,t0) has no FU that supports op LOADB"
+gemm_pace,pins,72,False,False,mm:2,semantic,consistent_reject,False,0,49,3,22,pin_slot_conflict,"pin for node 14 (op=MUL): datapath of PE (1,0,t0) is already used by node 49"
+gemm_pace,k25,72,False,False,mm:2,semantic,consistent_reject,False,17,49,3,26,pin_slot_conflict,"pin for node 14 (op=MUL): datapath of PE (1,0,t0) is already used by node 49"
+gemm_pace,k50,72,False,False,mm:2,semantic,consistent_reject,False,34,49,3,26,pin_slot_conflict,"pin for node 14 (op=MUL): datapath of PE (1,0,t0) is already used by node 49"
+gemm_pace,k100,72,False,False,mm:2,semantic,consistent_reject,False,68,49,3,30,pin_slot_conflict,"pin for node 14 (op=MUL): datapath of PE (1,0,t0) is already used by node 49"
+gemm_pace,rule,72,False,True,mm:0,,static_disagreement,False,71,49,3,34,pin_infeasible_op,"pin for node 30 (op=LOADB): PE (2,1,t0) has no FU that supports op LOADB"
+hpcg,pins,30,False,False,mm:1,semantic,consistent_reject,False,0,24,1,1,port_name_unknown,cannot resolve the port names for this edge
+hpcg,k25,30,False,False,mm:1,semantic,consistent_reject,False,8,24,1,1,port_name_unknown,cannot resolve the port names for this edge
+hpcg,k50,30,False,False,mm:1,semantic,consistent_reject,False,15,24,1,1,port_name_unknown,cannot resolve the port names for this edge
+hpcg,k100,30,False,False,mm:1,semantic,consistent_reject,False,29,24,1,4,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (1,0) to (0,"
+hpcg,rule,30,False,False,mm:1,semantic,consistent_reject,False,27,24,1,9,pin_infeasible_op,"pin for node 14 (op=LOADB): PE (1,1,t0) has no FU that supports op LOADB"
+mac,pins,28,False,False,abort,runtime,consistent_reject,False,0,22,0,1,port_name_unknown,cannot resolve the port names for this edge
+mac,k25,28,False,False,abort,runtime,consistent_reject,False,7,22,0,1,port_name_unknown,cannot resolve the port names for this edge
+mac,k50,28,False,False,abort,runtime,consistent_reject,False,13,22,0,2,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (1,0) to (2,"
+mac,k100,28,False,False,abort,runtime,consistent_reject,False,27,22,0,5,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (0,1) to (0,"
+mac,rule,28,False,True,mm:0,,static_disagreement,False,25,22,0,11,pin_infeasible_op,"pin for node 12 (op=LOADB): PE (3,3,t0) has no FU that supports op LOADB"
+mults1,pins,32,False,False,mm:8,semantic,consistent_reject,False,0,25,2,1,port_name_unknown,cannot resolve the port names for this edge
+mults1,k25,32,False,False,mm:8,semantic,consistent_reject,False,8,25,2,1,port_name_unknown,cannot resolve the port names for this edge
+mults1,k50,32,False,False,mm:8,semantic,consistent_reject,False,16,25,2,2,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (1,0) to (2,"
+mults1,k100,32,False,False,mm:8,semantic,consistent_reject,False,31,25,2,5,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (3,1) to (0,"
+mults1,rule,32,False,,no-sim,,no_mapping,False,31,25,2,10,pin_infeasible_op,"pin for node 16 (op=LOADB): PE (1,3,t0) has no FU that supports op LOADB"
+trmm,pins,12,True,True,mm:0,,consistent_pass,False,0,11,3,0,,
+trmm,k25,12,True,True,mm:0,,consistent_pass,False,3,11,3,0,,
+trmm,k50,12,False,True,mm:0,,static_disagreement,False,6,11,3,1,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (2,1) to (1,"
+trmm,k100,12,False,True,mm:0,,static_disagreement,False,12,11,3,2,hint_route_unrealisable,"the given route cannot be realised on the port graph: no legal port path from (2,1) to (1,"
+trmm,rule,12,False,True,mm:0,,static_disagreement,False,12,11,3,4,pin_infeasible_op,"pin for node 5 (op=LOADB): PE (2,0,t0) has no FU that supports op LOADB"
