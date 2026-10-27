@@ -102,3 +102,35 @@ B_plus_6_7  round 1 releasing [(9, 10)]   ok=True applied=19 flex=1 sim=Mismatch
 B_plus_4_5  round 1 releasing [(4, 5)]    ok=True applied=19 flex=1 sim=Mismatches::0
 3/3 cases green with Mismatches::0
 ```
+
+## 7. 仿真器断言的分类（哪些能进 verify）
+
+`grep -n "assert(" toolchain/vendor/simulator/src/*.cpp` 的活跃断言逐条归类：
+
+| 断言 | 位置 | 静态可判？ | 处置 |
+|---|---|---|---|
+| `!(I1isvalid && I2isvalid)`（SELECT 双操作数） | `CGRATile.cpp:175` | **部分** | 同周期到达 → `checkOperandExclusivity()` 报 `op` 冲突；跨周期"有效位残留"不可判，见下 |
+| `P/I1/I2.empty()`（输入寄存器被覆盖） | `CGRATile.cpp:352/358/364` | 是 | `checkInputExclusivity()`：同一 REGI 端口同一周期两个不同源 → `op` 冲突 |
+| `default: assert(false)` 未知 opcode | `CGRATile.cpp:285` | 否，且不可达 | mapper 只把 op 放在支持它的 FU 上，二进制不会出现未知编码 |
+| `assert(false)` 端口编号 | `CGRA.cpp:430` | 否，且不可达 | 内部编码路径，verify 不产生 |
+| 文件打不开 | `CGRA.cpp:75/181/214/215` | 环境 | 与映射无关 |
+| `assert(connectedTiles[...])` 邻接 tile 存在 | `CGRATile.cpp:579..697` | 否，由端口图保证 | 越界方向没有端口，路由走不过去 |
+| 其余（`//` 注释掉的） | `CGRATile.cpp` 多处 | — | 已失效 |
+
+### 7.1 残余的不可静态检查项
+
+`array_add` 的 SELECT（node 0）在参考解里两个操作数**本来就不同拍到达**：
+`12->0` 到 3（exec 3），`13->0` 到 7。仿真不报错是因为 tile 在 3 拍执行时
+只看到 I1 有效，取了 I1 分支。
+
+注入 `20->19` 后仿真在 `CGRATile.cpp:175` 断言，但两次映射里 PE(1,1) 的
+操作数寄存器写入表**逐条相同**——也就是说断言不是"同周期到达"引起的，
+而是 SELECT 实际执行的那一拍变了（取决于运行期谓词何时成立），这一拍上
+两个寄存器都还持有值。**这一层 mapper 看不到**：它只有静态的到达周期，
+没有执行门控信息。
+
+结论：verify 覆盖"同周期到达"这一充分条件（可复现：把 node 12 和 node 0
+都钉到 7 拍 → `op [[12,0],[13,0]] SELECT node 0 gets both operands in cycle 7`），
+残余的跨周期情形交给仿真兜底，且**已知会以 abort 而不是 report 的形式出现**。
+上层 agent 若需要机器可读的结论，应把"仿真 abort"映射成一条不是预期的
+失败（当前 `SimResult.evidence = "simulator aborted: Assertion ..."`）。
