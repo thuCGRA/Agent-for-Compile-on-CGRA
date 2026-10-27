@@ -137,3 +137,33 @@ strict 可映射 2/10、repair 可映射 7/10；**凡成功者延迟都是基线
 **三、功能性验证仍缺位。** 10 个 kernel 只有 array_add 有 trace，其余 `sim=no-trace`。32 位 trace 生成被 `gcc-multilib`/`libc6-dev-i386` 缺失阻塞（需 sudo 或 docker）。因此现在能引用的只有"可映射性 + 延迟"，**没有任何一条 LLM 放置经过仿真确认**；此前记录的 trmm/gemm "verified" 一并作废，等 trace 重建后重测。
 
 **四、教训。** 这类评测里，"工具没跑"和"跑了但失败"必须分开记：空响应、缺 trace、缺 bitstream 都曾以"失败"的形态进入表格。先把 `status` 拆成 `ok / no-trace / no-binary / abort / timeout`，再谈结论。
+
+## 13. 验证器校准：用 mapper 自己的解当标尺（2026-10-28）
+
+**方法**（`scripts/exp_verifier_mutation.py`，不依赖 trace）：对 10 个 kernel 先让 mapper 自己布一版（method 3 + 空 pins + repair，等价 PathFinder 但会写 report），把它当作"一定可布"的标尺解；再注入 4 类结构违规（LOAD 挪到非内存 PE、依赖距离压成 0、坐标重复、越界），看 `validate()` 能不能拒。
+
+**先说一个方法学陷阱。** 第一版我按请求的 II=4 去校验，得到"5/10 标尺解被拒、gemm_pace 报 28 条错"。改成用 report 里 mapper **实际用的 II** 后，gemm_pace 的 28 条全部消失。**II 取错会让假阳性翻十倍**，之前的"高误杀"结论里至少有一部分是这个原因。
+
+**修正 II 后的结果。**
+
+| kernel | 实际 II | 标尺解被拒 | 注入检出 |
+|---|---|---|---|
+| array_add | 4 | 0 | 4/4 |
+| array_cond | 4 | 3 | 4/4 |
+| conv2d | 4 | 3 | 4/4 |
+| conv3 | 4 | 1 | 4/4 |
+| gemm | 4 | 0 | 3/4 |
+| gemm_pace | 9 | 0 | 3/4 |
+| hpcg | 4 | 0 | 3/4 |
+| mac | 4 | 2 | 4/4 |
+| mults1 | 4 | 0 | 4/4 |
+| trmm | 4 | 0 | 2/3 |
+
+- **误杀率 4/10**，全部 9 条都是同一句：`child phase X is 0 cycle(s) after parent`。
+- 结构违规（bank / dup / bounds / dep0）检出 **100%**；唯一漏的是 `swap_t`——但交换两个节点的相位本来就可能是合法的，这是变异设计问题，不算验证器弱。
+
+**这条误杀说明什么。** HyCUBE 存在同周期旁路（组合直通），所以"相位差 >= 延迟"作为硬约束是**不成立**的；它恰好也是上一轮 LLM 放置被大面积误拒的同一个原因。而如果把这条规则降级成告警，`dep0` 这类注入就会同时失去检出——**静态规则在这里无法区分"合法的同周期旁路"和"把依赖压成 0 的违规"，这是模型的表达力上限，不是实现 bug。**
+
+结论：验证器只能当**预筛**（省 mapper 时间），不能当判据；真正的判据只能是 mapper 的布线结果，加上 trace 的仿真。
+
+**下一步（待 sudo 解开 trace）**：对同一批变异跑 mapper，量"验证器拒 / mapper 也拒"的重合度，算出预筛到底省了多少时间、漏放了多少。
