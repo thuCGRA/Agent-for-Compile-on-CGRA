@@ -207,9 +207,9 @@ TREG_RO/TREG_RI 链）。`-m 0` 产出这种解没问题，但 verify 模式下�
 
 ```
 error: --pins was given but --pins_mode is 0 (off), so the pins file would be ignored
-       silently. Pass --pins_mode 1 (strict) or 2 (prefer).
+       silently. Pass --pins_mode 1 (strict), 2 (prefer) or 3 (repair).
 ```
 
-`exit(2)`，并且 `--pins_mode` 超出 0/1/2 也报错。回归测试在 `tests/test_mapper_cli.py`
+`exit(2)`，并且 `--pins_mode` 超出 0/1/2/3 也报错（3 是 `PINS_REPAIR`，第一版把它一起拒掉了，测试里补了这条回归）。回归测试在 `tests/test_mapper_cli.py`
 （pytest 或 `python3 tests/test_mapper_cli.py` 均可跑，WSL 的 cgra-tc 环境没装 pytest）：
 3 项全绿。静默忽略是最坏的一种失败——它产出的数据看起来完全正常。

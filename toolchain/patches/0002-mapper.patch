@@ -211,7 +211,7 @@ index 0000000..836a7fc
 +
 +#endif /* LLMMAPPER_H_ */
 diff --git a/include/morpher/util/util.h b/include/morpher/util/util.h
-index ed23030..0b88c69 100755
+index ed23030..d678806 100755
 --- a/include/morpher/util/util.h
 +++ b/include/morpher/util/util.h
 @@ -47,6 +47,11 @@ struct arguments
@@ -238,21 +238,20 @@ index ed23030..0b88c69 100755
          .parse(argn, argc);
  
  	ret.dfg_filename = args.get_option<std::string>("--dfg");
-@@ -165,6 +175,22 @@ inline arguments parse_arguments(int argn, char *argc[]){
+@@ -165,6 +175,21 @@ inline arguments parse_arguments(int argn, char *argc[]){
  	ret.use_json = true;
  	ret.print_stat = args.get_option<bool>("--print_stat");
  	ret.morpher_light = args.get_option<bool>("--morpher_light");
 +	ret.pins_file = args.get_option<std::string>("--pins");
 +	ret.pins_mode = args.get_option<int>("--pins_mode");
-+	if (ret.pins_mode < 0 || ret.pins_mode > 2) {
-+		std::cerr << "error: --pins_mode takes 0 (off), 1 (strict) or 2 (prefer); got "
-+		          << ret.pins_mode << std::endl;
++	if (ret.pins_mode < 0 || ret.pins_mode > 3) {
++		std::cerr << "error: --pins_mode takes 0 (off), 1 (strict), 2 (prefer) or 3 (repair); "
++		          << "got " << ret.pins_mode << std::endl;
 +		exit(2);
 +	}
 +	if (!ret.pins_file.empty() && ret.pins_mode == 0) {
-+		std::cerr << "error: --pins was given but --pins_mode is 0 (off), so the pins file "
-+		             "would be ignored silently. Pass --pins_mode 1 (strict) or 2 (prefer)."
-+		          << std::endl;
++		std::cerr << "error: --pins was given but --pins_mode is 0 (off), so the pins file would be ignored silently. "
++		          << "Pass --pins_mode 1 (strict), 2 (prefer) or 3 (repair)." << std::endl;
 +		exit(2);
 +	}
 +	ret.report_file = args.get_option<std::string>("--report");
