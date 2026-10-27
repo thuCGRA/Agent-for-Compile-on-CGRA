@@ -142,7 +142,8 @@ k=0 是 `-m 0` 基线；k>0 用贪心参考布局 + 固定选点、repair(3)。�
 它取 `max(UserGiven, RecMin)`，**RecMin II 是图/架构的结构下界，pins 只约束位置、不改变 RecMin**。
 所以 II=3 对 9/10 个 kernel 结构性不可达（gemm_pace 的 RecMin 是 9），pin 密度无法改变这一层。
 能钉的 4 个 kernel 在 II=3 下，贪心布局也放不下（依赖延迟 + 3 个相位），pinned 尝试直接
-`placement_infeasible`；而允许 mapper 自己升到 RecMin 后，所有 kernel 本来就能映射。
+`placement_not_found`（启发式没找到，不是穷举证明的 `placement_infeasible`，见 §2.6）；
+而允许 mapper 自己升到 RecMin 后，所有 kernel 本来就能映射。
 
 副产品：60 行里 `mults1 critical 50%` 一次 mapper 内部断言崩溃
 （`PathFinderMapper.cpp:3871 printHyCUBEBinary: Assertion 'pe->getSingleRegPort("ER_RI")...' failed`），
@@ -160,7 +161,8 @@ report 写 ok 但没有 bitstream；已作为工具链 bug 记录，不影响结
 mapper 会把 II 下限提到 RecMin，所以 `gemm_pace` 的实际 target 是 **9**（其余 4），表按实际 II 标。
 
 `ok`=第一次 mapper 调用就过；`ok*`=strict 首调失败、repair 第二次才过；`FAIL`=两次都没过；
-`—`=放置器在 II=4 压根放不下（没有 mapper 调用）；`base` 行为 `-m 0`：
+`—`=我们的贪心参考布局在 II=4 没放下（`placement_not_found`：启发式未找到，不是穷举证明的
+`placement_infeasible`；§2.6 有诊断）；`base` 行为 `-m 0`：
 
 | kernel | base | degree 25/50/100 | critical 25/50/100 | bank 25/50/100 |
 |---|---|---|---|---|
@@ -199,9 +201,70 @@ mapper 会把 II 下限提到 RecMin，所以 `gemm_pace` 的实际 target 是 *
 * **25–50% 是「不亏可布性」的控制旋钮**：首调成功率 8–9/9（两处单次失败：hpcg bank-50、
   mac critical-25），时间与基线同量级；lat 大多持平或略差，只有 degree-50% 有 2 个赢
   （array_add 11→9、conv3 13→12），但它也有 5 个更差——仍是「钉哪几个」的问题，不是「钉多少」。
-* **唯一可能真有可布性价值的是 gemm**：`-m 0` 能映射（II=4 lat=13），但我们的贪心参考布局
-  在 II=4 放不下 26 个节点/4 个相位（三规则都报 `placement_infeasible`），所以表里是 `—`。
-  如果真模型能在 II=4 放出合法布局而映射成功，那才是「布局买到可布性」——这需要真模型数据。
+* **gemm 的 `—` 已诊断，不是「不可布」**：`-m 0` 在 II=4 映射成功（lat=13），把 mapper 自己的
+  放置 dump 出来用我们的 `validate()` 校验，**0 error、11 条 R3 告警**——约束不严于 mapper，
+  是贪心参考布局的搜索不完备（§2.6）。所以 gemm 不能作为「pin 买可布性」的正证据，也不能作为
+  反证；结论只保留「这批数据里 25–50% pin 没扩大可布集合」。
+
+### 2.6 gemm 的 `—` 是搜索不完备，不是不可布（诊断）
+
+父代理指出：mapper `-m 0` 在 II=4 能映射 gemm，而我们的贪心报放不下，两者同时成立只有
+「贪心不完备」或「校验比 mapper 严」两种解释。做了三步诊断：
+
+1. 给 vendor mapper 加 `--dump-placement <json>`（`include/morpher/util/util.h` 注册，
+   `CGRA_xml_compiler.cpp` 在映射成功后导出 `{node,op,x,y,t,lat}`），重建
+   `toolchain/out/cgra_xml_mapper`。`-m 0 -i 4` 在 gemm 上 Map Success II=4 lat=13，
+   dump 出 26 个节点的完整放置（`work/diagnostics/gemm_m0_placement.json`）。
+2. 用 `validate(facts, dump_pins, 4)` 校验：**ok=True, errors=0, warnings=11**（全部是 R3
+   跳数告警）。→ 我们的静态约束没有比 mapper 严（R3 那次是过约束，这次不是）。
+3. 定位贪心失败点：`no legal slot for node 9 (op=MUL, asap=8) at II=4`，seed 0–11 全失败；
+   mapper 把 node 9 放在 `(x=1,y=0,t=2)`。贪心按 `asap%II` 的固定相位、单趟无回溯，
+   父节点的相位选择把 MUL 锁死 → **启发式不完备**。
+
+结论与处理：
+
+* `placement_infeasible` 只留给**穷举证明**；启发式失败一律 `placement_not_found`
+  （`cli export-placement`、`eval_ii` 同步改名）。这条状态语义会一路影响结论可信度：
+  gemm 这一格不能被当成「pin 不是可布性杠杆」的证据。
+* 记成「静态模型过约束」的**反面**案例：这次约束是对的，错在搜索。以后遇到
+  `placement_not_found`，先跑 `scripts/diag_placement.py --dfg ... --arch ... --ii ...`
+  看 mapper 是否给出了我们漏掉的布局。
+* 若要补 gemm 的 pinned 数据，需要带回溯/随机的放置器（或真模型），不是改校验规则。
+
+复现：
+
+```
+python scripts/diag_placement.py --dfg work/eval-density/gemm/degree-0.0/gemm_PartPredDFG.xml     --arch work/eval-density/gemm/degree-0.0/gemm_mem.json --ii 4     --out work/diagnostics/gemm_m0_placement.json
+# -> validate: ok=True errors=0 warnings=11
+```
+
+### 2.7 仿真验证（生成 trace）：8/10 kernel 全对，hpcg/mults1 是 trace 对不齐
+
+trace 打通后（§7），对每种成功映射都跑了仿真（`work/simv/<k>-<tag>.log`）。0 失配的：
+
+| kernel | II | lat | Matches | Mismatches | cycles |
+|---|---|---|---|---|---|
+| array_add | 4 | 11 | 387 | 0 | 134 |
+| array_cond | 4 | 13 | 243 | 0 | 86 |
+| conv2d | 4 | 15 | 523 | 0 | 30 |
+| conv3 | 4 | 13 | 163 | 0 | 38 |
+| trmm | 4 | 6 | 5 | 0 | 9 |
+| gemm | 5 | 13 | 783 | 0 | 44 |
+| gemm_pace | 9 | 13 | 723 | 0 | 3600 |
+| mac | 5 | 10 | 167 | 0 | 94 |
+
+两个失败：
+
+- **hpcg**：trace_1 下 90 matches / 1 mismatch（trace_2–4 分别 89/2、89/2、88/3）。
+- **mults1**：79 matches / 8 mismatches。
+
+失配地址集中在数组尾部/循环外数据。原因不是布局相位（同样的 placement 在 array_add 上
+全对），而是 **trace 与 DFG 的循环体不对齐**：instrumentation 给的是整数组前后快照，DFG
+只映射最内层循环（`NODES` 里的循环体）；array_add 的「整程序 = 循环体」恰好全对，hpcg/mults1
+的循环体只覆盖部分数组。修法是按变量/循环裁剪 trace，或让 DFG 覆盖整个程序——本轮未做，
+因此 hpcg/mults1 的仿真结果记为「未验证」，不进入错误率分母。
+
+`gemm_pace` 的 II=9/3600 cycles 来自 RecMin II=9，不是布局失败。`mac` 的 167 匹配对应它较小的数组。
 
 ## 3. 管线与设计决策
 
@@ -237,7 +300,8 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
   `interfaces.Placer`/`Router` 协议。A 臂专属与共享工具的分界见 `docs/ARM_A_MODULES.md`。
 * **尺寸无关的布局导出**（B 臂用）：`cli export-placement --dfg ... --arch ... --placer greedy
   --ii 4 --export-placement out/pins.json`。xdim/ydim 全部来自 arch JSON（PE 列表），同一生成器可跑
-  4x4/3x3/3x2；失败时写 `{"status":"placement_infeasible","error":...}` 并退出 2（不是空 pins 糊过去）。
+  4x4/3x3/3x2；失败时写 `{"status":"placement_not_found","error":...}` 并退出 2（不是空 pins
+  糊过去）。状态名只用于启发式失败；`placement_infeasible` 留给穷举证明（§2.6）。
   也接受 B 文档里的无子命令写法 `cli --dfg ... --export-placement ...`。
 * **工具链失败不计入臂的错误率**：`run_mapper` 在「report 说 ok 但没有 bitstream」或「rc<0 崩溃」时
   设 `failure_class="toolchain"`、`ok=False`；pipeline 见到 toolchain 直接 abort，不占
@@ -255,8 +319,11 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
 
 ## 4. 已知限制
 
-1. **trace 生成被机器阻塞**。生成需要 32 位 i386 运行时（`gcc-multilib` + `libc6-dev-i386`），
-   本机没有且无 sudo。因此除 array_add 外都只能到 S5，`sim="skipped(no trace)"`。
+1. **trace 已能生成（§7）**：用 dfggen 的 instrumentation runtime + `scripts/gen_trace.sh`
+   为 9 个 kernel 生成了 `work/traces/<k>/<k>_trace_1.txt`。宿主程序是原生 x86_64（本机
+   有 32 位 libc 但缺 32 位 libstdc++ 头 `/usr/include/c++/13/32`，instrumentation.cpp 编不过
+   `-m32`）；trace 只记录 4 字节数据，宿主字长不影响仿真。array_add 用生成 trace 跑出
+   `Matches::387 Mismatches::0`，与 README 的期望值一致。fft 仍因 mapper 崩溃排除。
 2. **fft excluded: upstream mapper crash on empty bank attribute**。DFG 能生成（67 节点/93 边），
    但 mapper 在任意 II 崩溃 `std::logic_error: basic_string::_M_construct null not valid`
    （method 0 与 pinned 均崩），疑似 fft 的 arch/DFG 里有空字符串属性。是工具链 bug，不修、不报。
@@ -264,15 +331,24 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
    「mapper 可实现的 pin」不是一回事（STORE 的端口/相位、route 拥塞）。
 4. **R5 只是建议**：`update_mem_alloc.py` 生成的 arch 无 `CGRA.CONNECTIONS`，推不出 PE→bank；
    mapper 也不按 bank 限制放置，最终裁判是仿真。
-5. **仿真失败归因很粗**：只有「相位错」一条 CDD，未把失配地址映射回具体节点/边。
+5. **仿真失败归因很粗**：只有「相位错」一条 CDD，未把失配地址映射回具体节点/边；hpcg/mults1 的失配是 trace 与 DFG 循环体不对齐（§2.7），不是布局错误，但当前 CDD 仍会把它们报成相位问题。
 6. `max_rounds=4` 与重试预算会互相挤压；未装包时需 `PYTHONPATH=src`（`pyproject.toml` 已备好）。
-7. 缺失 kernel 已有替代（见 §5），但替代 kernel 没有 trace，只能到 S5。
+7. 缺失 kernel 已有替代（见 §5）；9 个 kernel 现在都有 trace（§7），`gemm_pace` 的 RecMin II
+   是 9，比其它 kernel 高一代。
 8. **mapper 不接受低于 RecMin 的 II**（§2.4）：`-i 3` 会被 `max(UserGiven, RecMin)` 提升到 4/9，
    且 method 3 也不跳 II。pinned 实验如果想考察「同 II 内的布线成功率」，必须在 RecMin 及以上做。
 9. `mults1 critical 50%` 触发 mapper 内部断言崩溃（`PathFinderMapper.cpp:3871`），report 声称 ok
    但无 bitstream；工具链 bug，不修。A 侧已用 `failure_class="toolchain"` 把它挡在错误率之外。
-10. §2.5 的 gemm 行没有 pinned 数据：贪心参考布局在 II=4 放不下（`placement_infeasible`），
-    不是 pin 失败；补测需要真模型或更强的放置器。
+10. §2.5 的 gemm 行没有 pinned 数据：贪心参考布局在 II=4 搜不到（`placement_not_found`）。
+    已诊断：mapper 的合法放置经我们 validate 为 0 error，是搜索不完备而非不可布（§2.6）；
+    补测需要带回溯/随机的放置器或真模型。
+
+11. **vendor mapper 的 `--dump-placement` 补丁不在 git 里**（`toolchain/vendor/` 被 ignore）：
+    源码改动用 `scripts/patch_mapper_dump.py` 幂等重放，重建用 `scripts/rebuild_mapper.sh`；
+    当前 `toolchain/out/cgra_xml_mapper` 已带 dump 功能，换机器/重拉 vendor 后要先跑这两个脚本。
+12. **时间戳 bundle 不是唯一副本**：`work/armA/<k>/<ts>/` 下 dfg/ 与 bitstream 可能被其它臂的
+    探针覆盖（同 DFG 同 II 但映射有随机性）。稳定输入与评测口径用 `work/kernels/<k>/`
+    （`scripts/export_kernels.py` 生成），时间戳 bundle 只作调试。
 
 ## 5. benchmark 集合（替换 md/stencil/spmv）
 
@@ -296,9 +372,43 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
 
 1. 真模型在 **25%/50% critical(+degree)** 两档做 A/B，而不是 100%；统计首次合法率、调用数、
    II/lat、`pins_applied/pins_total`。
-2. 解 trace 生成（装 `gcc-multilib libc6-dev-i386` 或换机器），把 10 个 kernel 推到 S6。
+2. ~~解 trace 生成~~ 已完成（§7）并用它做了仿真验证（§2.7）：8/10 kernel 0 失配；
+   hpcg/mults1 是 trace 与 DFG 循环体不对齐，需要按循环裁剪 trace 才算完。
 3. 把「dense pin 是负收益」做成 prompt 约束：要求模型只给 20–50% 的关键节点，其余留给 PathFinder。
 4. CDD 细化：用 `SIMULATOR=1` 的 `kII/PC/x/y/OP` 定位到具体 PE，把责任分到节点或边。
 5. 合并：按 `docs/ARM_A_MODULES.md` 注册 B 臂的 `placers/sa.py`、`routers/llm.py`。
 6. 「pin 救 II」方向已封闭（§2.4）；若要继续 II 维度，唯一入口是改 RecMin 算法（工具链改动），
    或者在同 RecMin 下比较 pinned/unpinned 的布线耗时与首次成功率。
+
+## 7. trace 生成（本轮打通）
+
+morpher 的 trace 是**插桩后的程序**跑出来的：dfggen 的 instrumentation runtime
+（`toolchain/vendor/dfggen/src/instrumentation/instrumentation.cpp`）在循环边界打印每个变量的
+`var_name,offset,pre-run-data,post-run-data`。`scripts/gen_trace.sh` 复现了 morpher
+`benchmarks/*/run_pass.sh` 的 recipe：
+
+```
+clang -D CGRA_COMPILER -emit-llvm        # 内核源码
+opt -gvn -mem2reg ... -simplifycfg       # 规范化
+opt -load libdfggenPass.so -fn <func> -nobanks 2 -banksize 2048 -type PartPred -skeleton
+g++ -std=c++14 -c instrumentation.cpp    # 原生 x86_64（无 32 位 libstdc++ 头）
+llc k_inst.ll -o k_inst.o; g++ -no-pie k_inst.o instrumentation.o -o final
+./final   # 在 memtraces/ 下写 trace，`main` 的返回值常是 checksum，退出码非 0 正常
+```
+
+`scripts/gen_traces_all.sh` 按 `configs/*.yaml` 批量跑，结果在 `work/traces/<kernel>/`：
+
+| kernel | traces | 备注 |
+|---|---|---|
+| array_add | 1 | 用生成 trace 仿真 `Matches::387 Mismatches::0`（README 期望值） |
+| array_cond | 1 | |
+| trmm | 4（源 992 条中取前 4） | |
+| hpcg | 4 | |
+| gemm | 4（源 64 条中取前 4） | |
+| gemm_pace | 1 | RecMin II=9 |
+| conv3 / conv2d / mac / mults1 | 1 / 4 / 1 / 1 | |
+
+`--trace` 显式传入时优先于三级查找；`run.json.sim.trace` 记录实际用了哪一条。
+`fft` 仍因 mapper 崩溃排除，没有 trace。
+
+仿真验证结论见 §2.7：8/10 kernel 0 失配（array_add 387/0 与 README 期望一致）；hpcg/mults1 的失配是 trace 与 DFG 循环体不对齐，记「未验证」而不是错误率。

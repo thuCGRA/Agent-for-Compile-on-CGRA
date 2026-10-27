@@ -732,10 +732,10 @@ class Pipeline:
                 src = last_map_job.file(name)
                 if os.path.isfile(src):
                     job.copy_in(src, key + ".json")
-            for name in os.listdir(last_map_job.path):
-                if name.endswith("_binary.bin"):
-                    job.copy_in(last_map_job.file(name), "bitstream.bin")
-                    break
+            # The mapper writes the bitstream next to the DFG, not into its cwd.
+            src = getattr(last_map, "binary", "") or ""
+            if src and os.path.isfile(src):
+                job.copy_in(src, "bitstream.bin")
 
         art = {}
         for name in ("config.yaml", "facts.json", "pins.json", "report.json", "sim.txt", "bitstream.bin"):

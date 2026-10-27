@@ -22,7 +22,8 @@ python -m cgra_agent.cli export-placement --dfg <DFG.xml> --arch <arch.json>
 ```
 
 尺寸（xdim/ydim/PE 列表）全部来自 arch JSON；失败时文件里写
-`{"status": "placement_infeasible", "error": ...}` 且退出码 2，不产出空 pins。
+`{"status": "placement_not_found", "error": ...}` 且退出码 2，不产出空 pins。
+`placement_infeasible` 只用于穷举证明；启发式失败一律 `placement_not_found`（ARM.md §2.6）。
 
 ad-hoc shell 脚本放在 `/home/steve/cac_scripts/armA/`（`cac_scripts/` 根目录两臂共用，勿混放）。
 
@@ -85,3 +86,51 @@ ad-hoc shell 脚本放在 `/home/steve/cac_scripts/armA/`（`cac_scripts/` 根�
   pipeline 自己归因。
 
 回归用例：`tests/test_mapper.py`（ok+无 bitstream、ok+有 bitstream、信号、阶段分类）。
+
+## 5. 字段口径（`pins[].t`、`placement[].lat`、`routeInfo -T`）
+
+这三个字段都叫「时间」，但语义不同，B 臂已因此栽过一次（把 `routeInfo` 的 `-T` 当 latency
+传给 pin，8 条 timing 冲突、布线全被拒，现象看起来像「策略全错」）。写死如下：
+
+| 字段 | 出现位置 | 单位 | 语义 |
+|---|---|---|---|
+| `pins[].t` | 我们写、mapper 读（`--pins --pins_mode`） | phase | **相位**：一个 II 内的第几拍，`0 <= t < II`。mapper 按相位给节点找时间槽。 |
+| `placement[].lat` | mapper `--report` / dump `--dump-placement` / 我们的 `report.json` | cycle | **绝对延迟**：从内核起点算的第几拍。`lat = t + k*II`。 |
+| `routeInfo` 的 `-T` | `*_routeInfo.log`（mapper 中间产物） | phase | **相位**，等于 `lat % II`。**不是延迟**，不能直接当 pin 的 `t` 之外的东西用，更不能当 `lat`。 |
+
+判断口诀：**pins 用相位，report 用延迟，routeInfo 的 `-T` 是相位。** 我们的
+`Pin(node,x,y,t)` 只接受相位；从 mapper 产物反推 pin 时必须 `t = lat % II`，
+反过来给 B 的 placement 要显式写 `lat` 时是绝对延迟，别再和 `t` 混。
+
+`pins_applied` 也要注意：它是 mapper 内部多轮放置尝试的**累计成功次数**（`LLMMapper.cpp:206`
+无 reset，method 3 不扫 II），不是去重节点数，也不是跨 II/进程累计；`pin_attempts` 是它的别名。
+
+## 6. 数据位置（给 B 的稳定路径）
+
+| 路径 | 内容 |
+|---|---|
+| `work/kernels/<kernel>/dfg.xml` | DFG（`*_PartPredDFG.xml` 的固定副本） |
+| `work/kernels/<kernel>/mem.json` | `update_mem_alloc.py` 生成、带 bank 标注的 arch |
+| `work/kernels/<kernel>/arch.json` | 原始 `hycube_original.json`（未改 bank） |
+| `work/kernels/<kernel>/mem_alloc.txt` | 变量基址表 |
+| `work/kernels/<kernel>/<kernel>_trace_*.txt` | 生成好的 trace（最多 4 条） |
+| `work/kernels/<kernel>/manifest.json` | 节点数、sha256、trace 列表 |
+| `work/traces/<kernel>/` | trace 原始输出（`scripts/gen_trace.sh` 的产物） |
+| `work/simv/<kernel>-<tag>.log` | 仿真扫描结果 |
+| `work/armA/<kernel>/<ts>/` | 单次 pipeline 的完整 bundle（时间戳目录，不保证唯一副本） |
+
+`work/kernels/` 由 `scripts/export_kernels.py` 重建（跑一遍 DFG pass，约 1–2 分钟/10 kernel）。
+时间戳 bundle 只用于调试，**B 读输入一律用 `work/kernels/`**；evaluation 产物以这里为准。
+
+## 7. vendor 补丁（不在 git 里）
+
+`toolchain/vendor/` 整体被 gitignore。本轮给 mapper 加了 `--dump-placement`（诊断用），
+源码改动不随仓库走：
+
+- `scripts/patch_mapper_dump.py`：幂等打补丁（`util.h` 注册选项、`CGRA_xml_compiler.cpp`
+  在 `printHyCUBEBinary` 后写 `{node,op,x,y,t,lat}` JSON）；
+- `scripts/rebuild_mapper.sh`：`cgra-tc`（GCC 7.5）下重建并覆盖 `toolchain/out/cgra_xml_mapper`。
+
+重建后 `toolchain/out/cgra_xml_mapper --dump-placement /tmp/p.json ...` 会在成功映射后打印
+`[dump] placement -> ...`。当前二进制已带该功能；如果不重建，dump 参数不存在，`scripts/diag_placement.py`
+会退化为只做 validate。

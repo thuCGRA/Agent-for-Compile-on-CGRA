@@ -179,12 +179,12 @@ def cmd_export_placement(args) -> int:
     try:
         placement = placer.place(facts, arch, ii, {})
     except GreedyError as exc:
-        out.update(status="placement_infeasible", error=str(exc)[:600])
+        out.update(status="placement_not_found", error=str(exc)[:600])
         with open(args.export_placement, "w") as f:
             json.dump(out, f, indent=2)
             f.write("\n")
         print(
-            "placement_infeasible: %s (wrote %s)" % (str(exc)[:300], args.export_placement),
+            "placement_not_found: %s (wrote %s)" % (str(exc)[:300], args.export_placement),
             file=sys.stderr,
         )
         return EXIT_UNVERIFIED
@@ -297,7 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--export-placement",
         required=True,
         metavar="OUT.json",
-        help="path of the pins.json to write; status=placement_infeasible on failure",
+        help="path of the pins.json to write; status=placement_not_found on failure",
     )
     e.set_defaults(func=cmd_export_placement)
     return p

@@ -5,7 +5,7 @@ k ∈ {0, 25%, 50%} × {degree, critical}。k=0 是 mapper 自己的 ``-m 0`` �
 k>0 用贪心参考布局 + 固定选点规则，pin 模式 repair(3)。
 指标是 **II=3 是否可映射**（成功率），lat 与 mapper 耗时作为次要项记录。
 
-贪心布局在 II=3 放不下时记为 ``placement_infeasible``：连参考布局都给不出合法相位分配，
+贪心布局在 II=3 放不下时记为 ``placement_not_found``：连参考布局都给不出合法相位分配，
 pin 无从谈起——这本身是负结果的一半。
 """
 
@@ -62,8 +62,8 @@ def run_one(repo, kernel, cfg, rule, ratio, out_root, timeout):
     try:
         placement = GreedyPlacer(seed=0).place(facts, facts, II, {})
     except Exception as exc:  # noqa: BLE001 参考布局在 II=3 不可行
-        return [_row(kernel, rule, ratio, "placement_infeasible", False, II,
-                     "placement_infeasible", 0, 0, 0,
+        return [_row(kernel, rule, ratio, "placement_not_found", False, II,
+                     "placement_not_found", 0, 0, 0,
                      time.monotonic() - t0, str(exc))]
 
     keep = set(select_pins(facts, ratio, rule))

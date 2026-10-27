@@ -18,7 +18,13 @@ from ..tools.jobdir import ToolError
 
 
 class GreedyError(ToolError):
-    """The graph does not fit the array at this II."""
+    """The heuristic could not place the graph at this II.
+
+    This is `placement_not_found`, not a proof of `placement_infeasible`: the
+    greedy walk is single-pass with no backtracking, and the mapper can (and
+    does) find layouts for kernels where this fails -- gemm is the canonical
+    example (see ARM.md section 2.6).
+    """
 
 
 class GreedyPlacer:
