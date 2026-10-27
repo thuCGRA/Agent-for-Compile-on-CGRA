@@ -170,3 +170,55 @@
    与 LLM 放置的 4/10 strict 成功率属同一类现象；
 2. 之前观测到的 `rule` 行不确定性是 **repair 模式的性质**，不是 cheap placement 本身的性质。
    引用 `rule` 行数字时必须写明 mode。
+
+## LLM 放置行（真端点 deepseek-v4.1-flash，非 A* 解）
+
+放置来自 `/home/steve/CGRA_Agent_Compiler/work/eval-llm/<kernel>/{strict,repair}/pins.json`，
+7 个 kernel（array_add, array_cond, trmm, conv3, gemm, conv2d, gemm_pace）。同一套双裁判：
+
+| mode | consistent_pass | over_permissive | static_disagreement | consistent_reject | no_mapping |
+|---|---|---|---|---|---|
+| 1 strict | 2 | 0 | 0 | 6 | 6 |
+| 2 prefer | 2 | 0 | 0 | 6 | 6 |
+| 3 repair | 2 | 0 | 2 | 10 | 0 |
+
+14 格/mode（7 kernel × 2 变体）。三个要先说清的事实：
+
+1. **`strict/` 与 `repair/` 两份 pins 逐字节相同**（7/7 kernel，`cmp` 相同）。
+   A 侧的反馈重试没有改变放置，所以"变体"这个轴目前没有信息量，14 格实为 7 格 × 2 份拷贝。
+   引用时按 kernel 报，别按变体报。
+2. **`over_permissive` 仍然是 0**。但这一行和 A 侧观测到的"array_add 20/20 接受、仿真断言崩溃"
+   并不矛盾——两边量的不是同一件事：
+   - A 侧的"接受"= pin 在最终映射里被兑现（`pinned=20/20`）；我这边同样 20/20 兑现；
+   - 我这边 `verify_ok` 判的是静态检查：同一份放置触发 1 条 `port_shared`
+     （`port carries the values of nodes 2 20018 in the same cycle`），所以它是
+     `consistent_reject`，不是 `over_permissive`。
+   要么 A 侧那次没带 `--verify`（或用了旧二进制），要么"接受"指的是映射成功而非静态通过。
+   这一点必须先对齐，否则 `over_permissive` 这一格会被记成两边结论冲突。
+3. **没有出现新的冲突类型**：verify 对 LLM 放置报的仍是 `port_shared` / `operand_select`，
+   外加 `no path found by the internal A*`（route 类）。"LLM 的 tile/time 会踩出没见过的冲突"
+   这个预期没有成立——至少在这 7 个 kernel 上，静态模型见过的错误类型是够用的。
+
+### LLM pins + A\* route bank（让 verify 有机会说 ok 的组合）
+
+只喂 pins 时 verify 要自己布通其余边，几乎必然先因 route 失败而拒，`over_permissive` 轮不到。
+把 LLM 的 pin 和 A\* 解的 route bank 拼起来（`tools/confusion_llm2.py`，mode 2）：
+
+| kernel | verify | sim | cell |
+|---|---|---|---|
+| array_add | ✗ | abort | consistent_reject |
+| array_cond | ✗ | abort | consistent_reject |
+| trmm | ✗ | mm:0 | static_disagreement |
+| conv3 | ✗ | abort | consistent_reject |
+| gemm | ✗ | no bin | no_mapping |
+| conv2d | ✗ | no bin | no_mapping |
+| gemm_pace | ✗ | no bin | no_mapping |
+
+拼来源的 route 与 pin 互相打架（`route path starts at (0,1) but the source of node 11 is pinned to (0,3)`），
+说明**混来源**的路线不能当正常输入用；这一组只用来确认"verify 在这 7 个 kernel 上不会轻易说 ok"。
+
+### 结论口径
+
+- LLM 行的 `over_permissive` 目前是**未观测到**，不是"不存在"。要观测它需要一份
+  verify 通过、仿真崩溃的解；已知能构造这种情况的是 `20→19` 那条跨周期 SELECT 残留。
+- 静态过严的方向在 LLM 行同样成立（trmm 的 `static_disagreement` 2 格，确定性、仿真 0 mismatch）。
