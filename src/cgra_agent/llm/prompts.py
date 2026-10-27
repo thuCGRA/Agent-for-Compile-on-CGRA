@@ -54,6 +54,7 @@ def build_messages(
     ii: int,
     feedback: Optional[str] = None,
     previous: Optional[Any] = None,
+    focus_nodes: Optional[list] = None,
 ) -> list:
     xmax = int(facts["xdim"]) - 1
     ymax = int(facts["ydim"]) - 1
@@ -119,6 +120,18 @@ it one column, rather than jumping to a far PE.""" % {
             feedback,
             "",
             "Improve the placement accordingly and answer again with the full json object.",
+        ]
+    if focus_nodes is not None:
+        listed = ", ".join(str(n) for n in sorted(set(int(n) for n in focus_nodes)))
+        parts += [
+            "",
+            "## Repair protocol for this attempt",
+            "CONFLICT nodes: %s" % (listed or "(none named by the tool)"),
+            "Change ONLY the nodes listed above. Every other node must keep exactly the",
+            "same (x, y, t) triple it had in your previous answer, copied verbatim.",
+            "Do not re-place, re-order or re-number anything else. If a conflict node has",
+            "no legal slot left, move its immediate neighbours instead and say which ones",
+            "in your reasoning.",
         ]
     else:
         parts += ["", "Now produce the placement json."]

@@ -51,10 +51,59 @@ KERNELS = ["array_add", "array_cond", "trmm", "hpcg", "gemm", "gemm_pace",
 ELAPSED_RE = re.compile(r"Elapsed time in seconds:\s*(\d+)\s*ms")
 FAIL_RE = re.compile(r"(no candidate DP matches pin[^\n]*|Route Failed[^\n]*)")
 
+SIM_RE = re.compile(r"Matches::(?P<m>\d+),\s*Mismatches::(?P<x>\d+)")
+CYCLE_RE = re.compile(r"CGRA cycles:\s*(?P<c>\d+)")
+SIM_BIN = os.path.join(ROOT, "toolchain", "out", "hycube_simulator")
+TRACE_LIB = os.path.join(ROOT, "toolchain", "vendor", "simulator", "test", "library")
+
+
+def find_binary(root):
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            if name.endswith("_binary.bin"):
+                return os.path.join(base, name)
+    return ""
+
+
+def find_trace(kernel):
+    kdir = os.path.join(KROOT, kernel)
+    for name in sorted(os.listdir(kdir)) if os.path.isdir(kdir) else []:
+        if name.startswith("trace") and name.endswith(".txt"):
+            return os.path.join(kdir, name)
+    cand = os.path.join(TRACE_LIB, kernel + "_trace_0.txt")
+    if os.path.isfile(cand):
+        return cand
+    return ""
+
+
+def sim_run(kernel, out_dir):
+    """Simulate the mapping this run produced; empty dict when nothing to run."""
+    binary = find_binary(out_dir) if os.path.isdir(out_dir) else ""
+    trace = find_trace(kernel)
+    mem_alloc = os.path.join(KROOT, kernel, "mem_alloc.txt")
+    if not binary:
+        return {"sim": "no-binary"}
+    if not trace:
+        return {"sim": "no-trace"}
+    cmd = [SIM_BIN, "-x", "4", "-y", "4", "-c", binary, "-d", trace,
+           "-a", mem_alloc, "-m", "4096"]
+    try:
+        out = subprocess.run(cmd, cwd=out_dir, capture_output=True, text=True, timeout=300).stdout
+    except subprocess.TimeoutExpired:
+        return {"sim": "timeout"}
+    m = SIM_RE.search(out)
+    cyc = CYCLE_RE.search(out)
+    if not m:
+        return {"sim": "abort", "mismatch": "", "cycles": cyc.group("c") if cyc else ""}
+    mism = int(m.group("x"))
+    return {"sim": "pass" if mism == 0 else "mismatch",
+            "mismatch": mism, "cycles": cyc.group("c") if cyc else ""}
+
+
 COLS = ["kernel", "strict_ok", "strict_accept", "strict_ii", "strict_lat",
         "strict_mapper_s", "repair_ok", "repair_accept", "repair_ii", "repair_lat",
         "repair_mapper_s", "llm_calls", "cached_calls", "prompt_tokens",
-        "completion_tokens", "strict_error", "status"]
+        "completion_tokens", "strict_error", "strict_sim", "strict_cycles", "repair_sim", "status"]
 
 
 def mapper_run(kernel, pins, mode, pins_mode, ii):
@@ -118,7 +167,7 @@ def call_or_cache(client, cache, kernel, dfg_sha, ii, messages, out_dir, tag):
     hit = cache.get(key)
     if hit is not None:
         return hit.get("response", ""), True, hit.get("usage") or {}
-    text = client.chat(messages, temperature=0.0, max_tokens=2048)
+    text = client.chat(messages, temperature=0.0, max_tokens=4096)
     usage = (client.records[-1].get("usage") or {}) if client.records else {}
     cache.put(key, text, usage=usage)
     os.makedirs(out_dir, exist_ok=True)
@@ -202,6 +251,9 @@ def main(argv=None):
         def acc(r):
             return "" if not r else "%s/%s" % (r.get("applied"), r.get("total"))
 
+        s_sim = sim_run(kernel, os.path.join(WORK, kernel, "strict")) if (strict and strict["ok"]) else {}
+        r_sim = sim_run(kernel, os.path.join(WORK, kernel, "repair")) if (repair and repair["ok"]) else {}
+
         rows.append({
             "kernel": kernel,
             "strict_ok": bool(strict and strict["ok"]),
@@ -219,6 +271,9 @@ def main(argv=None):
             "prompt_tokens": int(usage1.get("prompt_tokens") or 0),
             "completion_tokens": int(usage1.get("completion_tokens") or 0),
             "strict_error": error,
+            "strict_sim": s_sim.get("sim", ""),
+            "strict_cycles": s_sim.get("cycles", ""),
+            "repair_sim": r_sim.get("sim", ""),
             "status": "ok" if (strict and strict["ok"]) else ("repair-only" if (repair and repair["ok"]) else "failed"),
         })
         print("%-10s strict=%-5s accept=%-7s II=%-2s lat=%-3s %6ss | repair=%-5s %s II=%s lat=%s | calls=%d cached=%d" % (

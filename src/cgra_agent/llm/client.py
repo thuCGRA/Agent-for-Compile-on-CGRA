@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from urllib.parse import urlsplit
 from typing import Any, Dict, List, Optional
 
 try:
@@ -54,9 +55,15 @@ class LLMClient:
     # ------------------------------------------------------------------ http
     @property
     def chat_url(self) -> str:
-        if self.base_url.endswith("/chat/completions"):
-            return self.base_url
-        return self.base_url + "/chat/completions"
+        base = self.base_url
+        if base.endswith("/chat/completions"):
+            return base
+        # OpenAI-compatible servers normally mount the API under /v1.  When the
+        # configured base carries no path at all (e.g. https://api.example.com),
+        # assume that default; an explicit path is always left untouched.
+        if not urlsplit(base).path.strip("/"):
+            base = base + "/v1"
+        return base + "/chat/completions"
 
     def _record(self, rec: Dict[str, Any]) -> None:
         self.calls += 1
@@ -84,6 +91,11 @@ class LLMClient:
             "max_tokens": int(max_tokens),
             "stream": False,
         }
+        if os.environ.get("CGRA_LLM_NO_THINKING"):
+            # The reasoning channel can swallow the whole token budget and return
+            # an empty content string (finish_reason=length).  For structured
+            # placement output we disable it and record that we did.
+            payload["thinking"] = {"type": "disabled"}
         if seed is not None:
             payload["seed"] = int(seed)
         if extra:
