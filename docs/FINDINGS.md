@@ -56,6 +56,9 @@ mapper 的起始 II 是 `max(UserGiven, RecMin)`，RecMin 由 DFG 与架构决�
 
 ## 7. 仿真真值
 
+> **2026-10-27 更正：本节数字目前无法复现。** `work/` 下只剩 array_add 一条 trace，其余 kernel 在重跑中全部 `no-trace`；仓库其它位置也没有 trace。这些数字来自已不存在的中间产物，暂作作废处理，见第 12 节。
+
+
 8/10 kernel 零失配：array_add 387/0、array_cond 243/0、conv2d 523/0、conv3 163/0、trmm 5/0、gemm 783/0（II=5）、gemm_pace 723/0（II=9）、mac 167/0（II=5）。
 
 hpcg 90/1、mults1 79/8 记 `unverified`：trace 是整程序数组快照，DFG 只覆盖最内层循环，循环体边界不对齐。**不计入 pass。**
@@ -110,3 +113,27 @@ LLM 的待验证定位：**不是布得更好，而是在静态模型判不了�
 5. 直接让 LLM 出全图放置，功能性 2/10，延迟约为基线 2 倍。
 
 不能站的：LLM 能比 A* 布得更好；反馈重试能修复映射；pin 能压 II。
+## 12. 证据完整性更正（2026-10-27）
+
+**一、LLM 响应空转。** 审计 48 份缓存响应，10 份 `content` 为空。原因是推理模型把 token 预算耗在 `reasoning_content`（单次 2 万字符以上），`max_tokens=4096` 用尽后正文为空、`finish_reason=length`。评测把空串记成"模型给不出放置"，属于装置故障。已改：预算抬到 18432、空响应重试、`finish_reason`/`empty` 入日志。
+
+**二、重跑后的可映射性（II 固定，`work/eval-llm2`）。**
+
+| kernel | strict | lat | repair | lat | 基线 lat |
+|---|---|---|---|---|---|
+| array_add | 20/20 | 22 | 20/20 | 22 | 11 |
+| trmm | 11/11 | 12 | 11/11 | 12 | 6 |
+| gemm | 20/26 | — | 24/26 | 33 | 13 |
+| conv2d | 29/39 | — | 38/39 | — | 13 |
+| conv3 | 3/28 | — | 22/28 | 26 | 13 |
+| array_cond | 9/25 | — | 46/25* | 26 | 13 |
+| mults1 | 5/25 | — | 22/25 | 30 | — |
+| hpcg / gemm_pace / mac | 失败 | — | 失败 | — | — |
+
+\* `46/25` 说明 `pins_applied` 仍会把超出节点数的计数报出来，是待修 bug，不是模型行为。
+
+strict 可映射 2/10、repair 可映射 7/10；**凡成功者延迟都是基线的 1.8–2.6 倍**。
+
+**三、功能性验证仍缺位。** 10 个 kernel 只有 array_add 有 trace，其余 `sim=no-trace`。32 位 trace 生成被 `gcc-multilib`/`libc6-dev-i386` 缺失阻塞（需 sudo 或 docker）。因此现在能引用的只有"可映射性 + 延迟"，**没有任何一条 LLM 放置经过仿真确认**；此前记录的 trmm/gemm "verified" 一并作废，等 trace 重建后重测。
+
+**四、教训。** 这类评测里，"工具没跑"和"跑了但失败"必须分开记：空响应、缺 trace、缺 bitstream 都曾以"失败"的形态进入表格。先把 `status` 拆成 `ok / no-trace / no-binary / abort / timeout`，再谈结论。

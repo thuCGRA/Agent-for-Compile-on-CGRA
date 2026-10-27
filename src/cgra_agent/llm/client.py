@@ -88,7 +88,7 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": float(temperature),
-            "max_tokens": int(max_tokens),
+            "max_tokens": int(os.environ.get("CGRA_LLM_MAX_TOKENS") or max_tokens),
             "stream": False,
         }
         if os.environ.get("CGRA_LLM_NO_THINKING"):
@@ -123,6 +123,17 @@ class LLMClient:
                     break
                 data = resp.json()
                 text = self._content_of(data)
+                if not (text or "").strip():
+                    # A reasoning model can spend the whole budget before emitting
+                    # content; an empty answer is a harness failure, not a model
+                    # verdict, so retry instead of returning "".
+                    last_error = "empty content, finish_reason=%s" % (
+                        (data.get("choices") or [{}])[0].get("finish_reason")
+                    )
+                    if attempt < self.max_retries:
+                        time.sleep(min(2 ** (attempt - 1), 4))
+                        continue
+                    break
                 self._record(
                     {
                         "n": len(self.records) + 1,
@@ -131,6 +142,8 @@ class LLMClient:
                         "secs": secs,
                         "attempts": attempt,
                         "ok": True,
+                        "finish_reason": (data.get("choices") or [{}])[0].get("finish_reason"),
+                        "empty": not (text or "").strip(),
                         "usage": data.get("usage") or {},
                         "response": text,
                         "messages": messages,
