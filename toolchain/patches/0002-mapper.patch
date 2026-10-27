@@ -19,10 +19,10 @@ index 2877e32..19070d6 100755
  
 diff --git a/include/morpher/mapper/LLMMapper.h b/include/morpher/mapper/LLMMapper.h
 new file mode 100755
-index 0000000..6f89d70
+index 0000000..fb2fd27
 --- /dev/null
 +++ b/include/morpher/mapper/LLMMapper.h
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,163 @@
 +/*
 + * LLMMapper.h
 + *
@@ -94,6 +94,15 @@ index 0000000..6f89d70
 +	int to = -1;
 +	std::string port;
 +	std::string msg;
++	// every edge that drives this port in this cycle: a caller can decide which
++	// one to give way instead of restarting the whole route set
++	std::vector<std::pair<int, int>> edgeList;
++	// the edge we would release, and what that means for the caller:
++	//   "reroute"   it is already flexible, rerun and A* will place it
++	//   "flex"      it is fixed, add it to "flex" and rerun
++	//   "no-flex"   releasing it is not possible (it is the only edge here)
++	std::pair<int, int> suggest = std::make_pair(-1, -1);
++	std::string suggestAction;
 +};
 +
 +class LLMMapper : public PathFinderMapper
@@ -122,6 +131,14 @@ index 0000000..6f89d70
 +	bool loadPins();
 +	bool loadRoutes();
 +
++	// An edge listed in the routes file's "flex" array is routed by the internal
++	// A* even when a path was given for it, so a caller that gets a port conflict
++	// can promote the suggested edge and rerun instead of rebuilding every route.
++	bool isFlexEdge(int from, int to) const
++	{
++		return flexEdges.find(std::make_pair(from, to)) != flexEdges.end();
++	}
++
 +	// Same search as method 0, but with the pinned candidate queues; writes
 +	// reportFileName on the way out (success or failure).
 +	bool MapWithPins(CGRA *cgra, DFG *dfg);
@@ -133,19 +150,27 @@ index 0000000..6f89d70
 +
 +private:
 +	void writeReport(bool ok, CGRA *cgra);
-+	void addConflict(const std::string &type, int x, int y, int cycle, int from, int to,
-+					 const std::string &port, const std::string &msg);
++	MapConflict &addConflict(const std::string &type, int x, int y, int cycle, int from, int to,
++							 const std::string &port, const std::string &msg);
++
++	// marks one edge as the thing a caller should release to make progress
++	void noteSuggest(MapConflict &cf, int from, int to, bool flexible);
 +
 +	bool locateDP(int x, int y, int t, DFGNode *node, DataPath **out);
 +	bool dfsExplicit(int hopIdx, int hops, Port *cur, int lat, int endLat,
 +					 const RouteHint &h, Port *endPort, std::vector<LatPort> &path,
-+					 std::set<std::pair<Port *, int>> &seen, int depth);
++					 std::set<std::pair<Port *, int>> &seen, int depth,
++					 DFGNode *owner = NULL, int regHops = 0);
 +	bool buildExplicitPath(DFGNode *src, DFGNode *dst, const RouteHint &h,
 +						   int startLat, int endLat, std::vector<LatPort> &path);
 +	void checkPortOveruse();
 +
 +	std::map<int, PlacementPin> pins;
 +	std::map<std::pair<int, int>, RouteHint> routeHints;
++	std::set<std::pair<int, int>> flexEdges;
++	std::map<std::pair<int, int>, int> edgeSlack;
++	std::vector<std::pair<int, int>> suggestEdges;
++	int flexRerouted = 0;
 +	std::vector<MapConflict> conflicts;
 +	std::string pinsFileName;
 +	std::string routesFileName;
@@ -279,10 +304,10 @@ index 135f487..8df214e 100755
 \ No newline at end of file
 diff --git a/src/mapper/LLMMapper.cpp b/src/mapper/LLMMapper.cpp
 new file mode 100755
-index 0000000..ec0848d
+index 0000000..63f62e4
 --- /dev/null
 +++ b/src/mapper/LLMMapper.cpp
-@@ -0,0 +1,975 @@
+@@ -0,0 +1,1168 @@
 +/*
 + * LLMMapper.cpp
 + *
@@ -311,7 +336,28 @@ index 0000000..ec0848d
 +// binary printer encodes a single registered hop, not an arbitrary walk through
 +// the register file, so a path that parks the value in TREG/ER for many cycles
 +// maps fine and then cannot be emitted.
-+static const int REG_HOP_CAP = 2;
++// How many cycles a routed value may spend in register files on its way.
++// HyCUBE's binary encoding can only express a bounded wait, so the DFS has to
++// refuse longer ones; the baseline mapping needs up to 5 for the 4->5 edge, so
++// the bound is a knob (LLM_REG_HOP_CAP) with a safe default rather than a guess.
++static int regHopCap()
++{
++	static int cap = -1;
++	if (cap < 0)
++	{
++		const char *env = getenv("LLM_REG_HOP_CAP");
++		// 2 keeps every accepted route inside the register chain the binary
++		// encoding can express; longer waits print a mapping the simulator then
++		// disagrees with (measured: cap 12 -> 20 mismatches), so a route that
++		// needs more is reported as unrealisable instead of being accepted
++		cap = env ? atoi(env) : 2;
++		if (cap < 0)
++		{
++			cap = 2;
++		}
++	}
++	return cap;
++}
 +
 +static std::string strint(int v) { return std::to_string(v); }
 +
@@ -422,6 +468,22 @@ index 0000000..ec0848d
 +		lastRestrictError = std::string("routes json parse error: ") + e.what();
 +		std::cerr << "[routes] " << lastRestrictError << "\n";
 +		return false;
++	}
++
++	nlohmann::json::iterator fi = j.find("flex");
++	if (fi != j.end() && fi->is_array())
++	{
++		for (nlohmann::json::iterator f = fi->begin(); f != fi->end(); ++f)
++		{
++			if (!f->is_array() || f->size() != 2)
++			{
++				std::cerr << "[routes] skipping malformed flex entry (need [from,to])\n";
++				continue;
++			}
++			flexEdges.insert(std::make_pair((*f)[0].get<int>(), (*f)[1].get<int>()));
++		}
++		std::cout << "[routes] " << flexEdges.size()
++				  << " edge(s) are flexible, A* may reroute them\n";
 +	}
 +
 +	nlohmann::json::iterator it = j.find("routes");
@@ -588,8 +650,8 @@ index 0000000..ec0848d
 +
 +// ---------------------------------------------------------------- report
 +
-+void LLMMapper::addConflict(const std::string &type, int x, int y, int cycle, int from, int to,
-+							const std::string &port, const std::string &msg)
++MapConflict &LLMMapper::addConflict(const std::string &type, int x, int y, int cycle, int from, int to,
++									 const std::string &port, const std::string &msg)
 +{
 +	MapConflict c;
 +	c.type = type;
@@ -601,6 +663,20 @@ index 0000000..ec0848d
 +	c.port = port;
 +	c.msg = msg;
 +	conflicts.push_back(c);
++	return conflicts.back();
++}
++
++void LLMMapper::noteSuggest(MapConflict &cf, int from, int to, bool flexible)
++{
++	cf.edgeList.push_back(std::make_pair(from, to));
++	cf.suggest = std::make_pair(from, to);
++	// a fixed edge becomes routable once the caller lists it in "flex";
++	// an already flexible one only needs another round
++	cf.suggestAction = flexible ? "reroute" : "flex";
++	if (std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++	{
++		suggestEdges.push_back(cf.suggest);
++	}
 +}
 +
 +void LLMMapper::writeReport(bool ok, CGRA *cgra)
@@ -626,6 +702,8 @@ index 0000000..ec0848d
 +	r["routes_total"] = (int)routeHints.size();
 +	r["routes_applied"] = routesApplied;
 +	r["routes_rejected"] = routesRejected;
++	r["flex_total"] = (int)flexEdges.size();
++	r["flex_rerouted"] = flexRerouted;
 +	if (!lastRestrictError.empty())
 +	{
 +		r["error"] = lastRestrictError;
@@ -667,14 +745,38 @@ index 0000000..ec0848d
 +		e["pe"] = nlohmann::json::array({c.x, c.y});
 +		e["cycle"] = c.cycle;
 +		e["port"] = c.port;
-+		if (c.from >= 0 && c.to >= 0)
++		if (!c.edgeList.empty())
++		{
++			e["edges"] = nlohmann::json::array();
++			for (size_t k = 0; k < c.edgeList.size(); ++k)
++			{
++				e["edges"].push_back(nlohmann::json::array({c.edgeList[k].first, c.edgeList[k].second}));
++			}
++		}
++		else if (c.from >= 0 && c.to >= 0)
 +		{
 +			e["edges"] = nlohmann::json::array({nlohmann::json::array({c.from, c.to})});
++		}
++		if (c.suggest.first >= 0 && !c.suggestAction.empty())
++		{
++			nlohmann::json s;
++			s["edge"] = nlohmann::json::array({c.suggest.first, c.suggest.second});
++			s["action"] = c.suggestAction;
++			e["suggest"] = s;
 +		}
 +		e["msg"] = c.msg;
 +		cf.push_back(e);
 +	}
 +	r["conflicts"] = cf;
++
++	// one round of the repair loop: the caller promotes these edges to "flex"
++	// and reruns; nothing else in the route set has to change
++	nlohmann::json se = nlohmann::json::array();
++	for (size_t i = 0; i < suggestEdges.size(); ++i)
++	{
++		se.push_back(nlohmann::json::array({suggestEdges[i].first, suggestEdges[i].second}));
++	}
++	r["suggest_edges"] = se;
 +
 +	std::ofstream out(reportFileName.c_str());
 +	if (!out.is_open())
@@ -768,11 +870,23 @@ index 0000000..ec0848d
 +	}
 +
 +	std::vector<LatPort> nexts = cur->getMod()->getNextPorts(std::make_pair(lat, cur), this);
++	static const bool dbg = getenv("LLM_DEBUG_ROUTE") != NULL;
++	if (dbg)
++	{
++		std::cerr << std::string(depth, ' ') << "hop " << hopIdx << "/" << hops << " at ("
++				  << cur->getMod()->getPE()->X << "," << cur->getMod()->getPE()->Y << ") lat " << lat
++				  << " port " << cur->getFullName() << " -> " << nexts.size() << " candidate(s)\n";
++	}
 +	for (size_t i = 0; i < nexts.size(); ++i)
 +	{
 +		LatPort np = nexts[i];
 +		if (np.first > endLat)
 +		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": past the consumer\n";
++			}
 +			continue;
 +		}
 +
@@ -792,10 +906,20 @@ index 0000000..ec0848d
 +		}
 +		if (ni < 0)
 +		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " at ("
++						  << pe->X << "," << pe->Y << ") lat " << np.first << ": not on the requested path\n";
++			}
 +			continue;
 +		}
 +		if (seen.find(std::make_pair(np.second, np.first)) != seen.end())
 +		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": already used\n";
++			}
 +			continue;
 +		}
 +		// a port carries one signal per cycle: never step onto a port another
@@ -812,12 +936,22 @@ index 0000000..ec0848d
 +		}
 +		if (taken)
 +		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": driven by another node in this cycle\n";
++			}
 +			continue;
 +		}
 +		PortType nt = np.second->getType();
 +		int nreg = regHops + ((nt == REGI || nt == REGO) ? 1 : 0);
-+		if (nreg > REG_HOP_CAP)
++		if (nreg > regHopCap())
 +		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": register wait beyond the cap\n";
++			}
 +			continue;
 +		}
 +		seen.insert(std::make_pair(np.second, np.first));
@@ -907,6 +1041,12 @@ index 0000000..ec0848d
 +		return false;
 +	}
 +
++	if (getenv("LLM_DEBUG_ROUTE"))
++	{
++		std::cerr << "[dfs] edge " << src->idx << "->" << dst->idx << " from " << startPort->getFullName()
++				  << " lat " << startLat << " to " << endPort->getFullName() << " lat " << endLat
++				  << " hops " << hops << " opType " << src->getOPtype(dst) << "\n";
++	}
 +	path.push_back(std::make_pair(startLat, startPort));
 +	std::set<std::pair<Port *, int>> seen;
 +	seen.insert(std::make_pair(startPort, startLat));
@@ -919,7 +1059,7 @@ index 0000000..ec0848d
 +						strint(h.coords[0].first) + "," + strint(h.coords[0].second) + ") to (" +
 +						strint(lastX) + "," + strint(lastY) + ") over " + strint(hops) +
 +						" hop(s) (illegal turn, occupied port, or a wait in the register file of more than " +
-+						strint(REG_HOP_CAP) + " cycle(s))");
++						strint(regHopCap()) + " cycle(s))");
 +		return false;
 +	}
 +	return true;
@@ -953,26 +1093,75 @@ index 0000000..ec0848d
 +				{
 +					continue;
 +				}
++				// per cycle: which source nodes drive the port, and through which
++				// edges (an edge is (source node, consumer node))
 +				std::map<int, std::set<int>> perCycle;
++				std::map<int, std::set<std::pair<int, int>>> edgesPerCycle;
 +				for (size_t k = 0; k < p->mapped_nodes.size(); ++k)
 +				{
 +					DFGNode *n = std::get<0>(p->mapped_nodes[k]);
++					// tuple is (source node, index of the consumer, cycle)
++					int cons = std::get<1>(p->mapped_nodes[k]);
 +					int lat = std::get<2>(p->mapped_nodes[k]);
 +					perCycle[lat].insert((int)n->idx);
++					if (cons >= 0)
++					{
++						edgesPerCycle[lat].insert(std::make_pair((int)n->idx, cons));
++					}
 +				}
 +				for (std::map<int, std::set<int>>::iterator c = perCycle.begin(); c != perCycle.end(); ++c)
 +				{
-+					if (c->second.size() > 1)
++					if (c->second.size() <= 1)
 +					{
-+						std::string nodes;
-+						for (std::set<int>::iterator e = c->second.begin(); e != c->second.end(); ++e)
++						continue;
++					}
++					std::string nodes;
++					for (std::set<int>::iterator e = c->second.begin(); e != c->second.end(); ++e)
++					{
++						nodes += " " + strint(*e);
++					}
++					PE *pe = p->getMod()->getPE();
++					MapConflict &cf = addConflict("port", pe ? pe->X : -1, pe ? pe->Y : -1, c->first,
++												  *c->second.begin(), -1, p->getFullName(),
++												  "port carries the values of nodes" + nodes + " in the same cycle");
++
++					// pick the edge to release: prefer one that is already
++					// flexible (rerunning fixes it), else the one with the most
++					// slack, which is the one that can afford a detour
++					const std::set<std::pair<int, int>> &es = edgesPerCycle[c->first];
++					int bestSlack = -1;
++					for (std::set<std::pair<int, int>>::const_iterator e = es.begin(); e != es.end(); ++e)
++					{
++						cf.edgeList.push_back(*e);
++						bool flex = isFlexEdge(e->first, e->second);
++						if (!flex && cf.suggestAction == "reroute")
 +						{
-+							nodes += " " + strint(*e);
++							continue;
 +						}
-+						PE *pe = p->getMod()->getPE();
-+						addConflict("port", pe ? pe->X : -1, pe ? pe->Y : -1, c->first,
-+									*c->second.begin(), -1, p->getFullName(),
-+									"port carries the values of nodes" + nodes + " in the same cycle");
++						std::map<std::pair<int, int>, int>::iterator si = edgeSlack.find(*e);
++						int slack = (si == edgeSlack.end()) ? 0 : si->second;
++						if (flex && cf.suggestAction != "reroute")
++						{
++							cf.suggest = *e;
++							cf.suggestAction = "reroute";
++							bestSlack = slack;
++						}
++						else if (cf.suggestAction != "reroute" && slack > bestSlack)
++						{
++							cf.suggest = *e;
++							cf.suggestAction = "flex";
++							bestSlack = slack;
++						}
++					}
++					if (cf.suggestAction.empty() && !es.empty())
++					{
++						cf.suggest = *es.begin();
++						cf.suggestAction = "no-flex";
++					}
++					if (cf.suggest.first >= 0 &&
++						std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++					{
++						suggestEdges.push_back(cf.suggest);
 +					}
 +				}
 +			}
@@ -1182,22 +1371,31 @@ index 0000000..ec0848d
 +
 +			std::map<std::pair<int, int>, RouteHint>::iterator rit =
 +				routeHints.find(std::make_pair((int)src->idx, (int)dst->idx));
++			// a flexible edge keeps its hint only as documentation: the A* owns it
++			const bool flexible = isFlexEdge((int)src->idx, (int)dst->idx);
++			const bool fixed = (rit != routeHints.end()) && !flexible;
 +
-+			// phase 0 assigns the externally given routes before the internal A*
-+			// touches any port, so a hint is never rejected just because a
-+			// fallback route happened to consume its crossbar first
-+			if (phase == 0 && rit == routeHints.end())
++			// phase 0 assigns the fixed routes before the internal A* touches any
++			// port, so a hint is never rejected just because a fallback route
++			// happened to consume its crossbar first
++			if (phase == 0 && !fixed)
 +			{
 +				continue;
 +			}
-+			if (phase == 1 && rit != routeHints.end())
++			if (phase == 1 && fixed)
 +			{
 +				continue;
 +			}
++			edgeSlack[std::make_pair((int)src->idx, (int)dst->idx)] = endLat - startLat;
++			if (flexible && rit != routeHints.end())
++			{
++				++flexRerouted;
++			}
 +
-+			if (rit != routeHints.end())
++			if (fixed)
 +			{
 +				std::vector<LatPort> path;
++				size_t conflictsBefore = conflicts.size();
 +				if (buildExplicitPath(src, dst, rit->second, startLat, endLat, path))
 +				{
 +					assignPath(src, dst, path);
@@ -1206,6 +1404,26 @@ index 0000000..ec0848d
 +				}
 +				else
 +				{
++					// the caller gave a path the port graph cannot realise: hand the
++					// edge back so it can be released and rerouted on the next run.
++					// buildExplicitPath usually already reported why, so annotate
++					// that conflict instead of stacking a second one on top of it
++					MapConflict *cf = NULL;
++					for (size_t ci = conflictsBefore; ci < conflicts.size(); ++ci)
++					{
++						if (conflicts[ci].from == (int)src->idx && conflicts[ci].to == (int)dst->idx)
++						{
++							cf = &conflicts[ci];
++							break;
++						}
++					}
++					if (cf == NULL)
++					{
++						cf = &addConflict("route", dst->rootDP->getPE()->X, dst->rootDP->getPE()->Y,
++										  dstLat, src->idx, dst->idx, "",
++										  "the given route cannot be realised on the port graph");
++					}
++					noteSuggest(*cf, (int)src->idx, (int)dst->idx, flexible);
 +					ok = false;
 +				}
 +				continue;

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
-from typing import Any, List, Optional, Protocol, Sequence
+from typing import Any, List, Optional, Protocol, Sequence, Tuple
 
 
 # ---------------------------------------------------------------- 布局
@@ -51,9 +51,13 @@ class RouteEdge:
 @dataclass
 class Routes:
     edges: List[RouteEdge] = field(default_factory=list)
+    # 释放给布线器自己重路由的边：即使写在 edges 里也不再被逐跳校验
+    flex: List[Tuple[int, int]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["flex"] = [list(e) for e in self.flex]
+        return d
 
 
 # ---------------------------------------------------------------- 证据
@@ -68,9 +72,15 @@ class MapReport:
     pins_applied: int = 0
     pins_rejected: int = 0
     error: str = ""
-    conflicts: List[dict] = field(default_factory=list)  # {pe, cycle, port, edges}
+    conflicts: List[dict] = field(default_factory=list)  # {type, pe, cycle, port, edges, suggest, msg}
     placement: List[dict] = field(default_factory=list)
     elapsed_s: float = 0.0
+    routes_total: int = 0
+    routes_applied: int = 0
+    flex_total: int = 0
+    flex_rerouted: int = 0
+    # 调用方该释放的边，直接抄进 Routes.flex 重跑一轮
+    suggest_edges: List[Tuple[int, int]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "MapReport":
