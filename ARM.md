@@ -342,6 +342,36 @@ II=4 lat=14（`-m 0` 基线 lat=13）。所以 gemm 的 `—` 现在应读作「
 - `strict_accept` 里 `applied` 是 mapper 的累计尝试数（含迭代重试），可能大于 `total`；
   对比时只看"是否 ok"和失败阶段。
 
+## 2.11 LLM 臂实验装置（端点一到就能出表）
+
+`scripts/eval_llm_placement.py`：10 kernel × II=4，端点读 `CGRA_LLM_BASE_URL` /
+`CGRA_LLM_MODEL` / `CGRA_LLM_API_KEY`。**没有端点直接打印 `NO_ENDPOINT` 并以 2 退出**，
+不产生任何假数据。
+
+每 kernel 一次调用；若 mapper strict 失败，第二次调用把 mapper 的原始报错（
+`no candidate DP matches pin ...` / `Route Failed`）**原样**作为 `feedback` 回灌
+（`llm/prompts.py` 的 `build_messages(facts, ii, feedback=...)`），提示词要求只改受影响的节点。
+之后用最终布局再跑一次 repair（`--pins_mode 3`）。
+
+记录列：`strict_ok`、`strict_accept`、`strict_ii`、`strict_lat`、`strict_mapper_s`、
+`repair_ok`、`repair_accept`、`repair_ii`、`repair_lat`、`repair_mapper_s`、
+`llm_calls`、`cached_calls`、`prompt_tokens`、`completion_tokens`、`strict_error`。
+每次原始响应写 `work/eval-llm/<kernel>/llm/call{1,2}.json`（messages + response + usage）。
+
+缓存：`(kernel, dfg_sha, ii, prompt_sha)` → `work/llm-cache/xx/<sha>.json`；
+重跑同一 DFG/II/prompt 时直接回放，`cached_calls` 计数、不发请求（mock 日志实测 1→1）。
+
+链路状态（mock 回放 `pins_m0.json`，**不产生数字**）：array_add strict 20/20、
+trmm/gemm 第一次失败后反馈重问（`no pin for node ...`），表与列都能成型；
+fixture 存在 `tests/fixtures/llm_placement_response.json`，测试回放解析。
+
+**判读基线（定死，不再改）：**
+- `rule`：strict 3/10，通过的三例 lat +3~+5；
+- `greedy`：放置 10/10，但 strict 全量 pin 被拒 5 个；
+- `none`：10/10，lat 基线（见 §2.9）；
+- **LLM 只有 `strict_accept ≥ 8/10` 且 `lat` 差 ≤ +1 才算有贡献**；只提 strict_accept
+  而 lat 变差，只是换了一个代价旋钮。
+
 ## 3. 管线与设计决策
 
 ```
