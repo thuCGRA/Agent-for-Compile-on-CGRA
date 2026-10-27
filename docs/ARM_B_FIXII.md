@@ -88,3 +88,42 @@ k25/50/100 = 全部节点 pin + 该比例的边给出固定路径（RulePolicy, 
 
 `oracle` 是 `rule`/`llm` 的天花板。判读规则：`rule` 的 lat 接近 `oracle`、时间也接近，
 才算真结论；`rule` 的质量与 `none` 相同、而时间远低于 `none`，那只是"错得快"。
+
+## 六、10 个真实 kernel 的固定 II 结果（oracle pin，3 次重复）
+
+II 全部钉在 4；pin 来自每个 kernel 自己 `-m 0` 的解（**神谕 pin**，见第五节口径），
+跨 k 固定；每格 3 次重复，表里是中位数秒数，所有格子 IQR = 0。
+
+| kernel | 边 | m0（无 pin） | pins | k25 | k50 | k100 |
+|---|---|---|---|---|---|---|
+| trmm | 12 | ok 0.82 | ok 0.37 lat8 | ok 0.42 | ok 0.37 | ok 0.37 |
+| array_add | 23 | ok 1.22 | ok 0.36 lat13 | ok 0.37 | ok 0.37 | ok 0.37 |
+| mac | 28 | ok 2.08 | ✗ cf1 | ✗ cf1 | ✗ cf2 | ✗ cf5 |
+| hpcg | 30 | ok 5.58 | ✗ cf1 | ✗ cf3 | ✗ cf3 | ✗ cf4 |
+| gemm | 31 | ok 3.76 | ✗ cf2 | ✗ cf3 | ✗ cf5 | ✗ cf6 |
+| conv3 | 32 | ok 1.73 | ok 0.37 lat15 | ok 0.37 | ✗ cf4 | ok 0.37 |
+| array_cond | 32 | ok 1.87 | ✗ cf1 | ✗ cf2 | ✗ cf2 | ✗ cf5 |
+| conv2d | 46 | ok 2.35 | ✗ cf6 | ✗ cf1 | **ok 0.37 lat17** | **ok 0.37 lat17** |
+| gemm_pace | 72 | ok **12.44** | ✗ cf22 | ✗ cf25 | ✗ cf26 | ✗ cf30 |
+| mults1 | 32 | ok 4.13 | ✗ cf1 | ✗ cf1 | ✗ cf2 | ✗ cf5 |
+
+（cfN = 首轮冲突数；✗ 表示最终仍不 ok。每条边的拒绝原因都在 `work/armB/fixii/*/k*/*_report.json`。）
+
+### 四条读法
+
+1. **剪枝省 2.2–29 倍时间，规模越大越明显**：trmm 0.82→0.37（2.2x）、gemm_pace 12.44→0.42（29x）。
+   中位数约 4–5 倍。但这是**剪枝**的上界，不是提示的价值（见第五节）。
+2. **神谕 pin 只有 3/10 能过 verify**（trmm、array_add、conv3）。也就是说"把 A\* 自己的解喂回去"
+   这件事本身经常不可校验——不是因为解错，而是 verify 内部的 A\* 分支复现不出同样的端口选择。
+   因此 pin 的"上界"实际被 verify 的能力卡住，不是被布线质量卡住。
+3. **conv2d 出现反转**：全 pin 失败（6 冲突），但 k50/k100 成功（lat=17）。给显式路线反而更容易复现，
+   说明瓶颈在"验证器自己重走路径"，不在"路线从哪来"。这条对后面的实验设计是个警告：
+   不要把"pins 失败"直接当成"这个布局不好"。
+4. **`first_call_ok` 全为 False**：10 个 kernel 无一例外至少 2 轮才收敛（trmm0/array_add0 的 pins 档
+   是唯一首轮就过的组合）。flex 通道是必需品，不是优化。
+
+### 附：寄存器跳预检（`register_hops`）
+
+`routers/base.py` 加了 `register_hops(path, slack) = max(0, hops - 2*(slack+1))`，
+≥3 的边不再作为固定路线送出（留给出 A\*）。它救不了 `mac`/`mults1`：这两个 kernel 在
+**零路线**的全 pin 档就已经失败，原因不是路线，而是 §9 的 operand 端口名缺失。

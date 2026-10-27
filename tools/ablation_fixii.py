@@ -30,6 +30,7 @@ MAPPER = os.path.join(REPO, "toolchain/out/cgra_xml_mapper")
 OUT = os.path.join(REPO, "work/armB/fixii")
 ARMA = "/home/steve/cac-armA/work/armA"
 KERNELS = os.environ.get("KERNELS_ENV", "array_add,conv2d,conv3,mac,mults1").split(",")
+KERNELS_ROOT = os.environ.get("KERNELS_ROOT", "")
 II, XD, YD = 4, 4, 4
 TIMEOUT = 300
 
@@ -40,6 +41,14 @@ NODE_RE = re.compile(r"^node=(\d+),mapped=PE(?:_MEM)?_X(\d+)\|?_Y(\d+)[^\s]*-T(\
 # ------------------------------------------------------------------ instances
 
 def instance(kernel):
+    if KERNELS_ROOT:
+        kd = os.path.join(KERNELS_ROOT, kernel)
+        dfg = os.path.join(kd, "dfg.xml")
+        mem = os.path.join(kd, "mem.json")
+        if os.path.exists(dfg) and os.path.exists(mem):
+            alloc = os.path.join(kd, "mem_alloc.txt")
+            return {"kernel": kernel, "dfg": dfg, "mem": mem, "dir": kd,
+                    "alloc": alloc if os.path.exists(alloc) else ""}
     ps = sorted(glob.glob(os.path.join(ARMA, kernel, "*", "dfg", "*_PartPredDFG.xml")),
                 key=os.path.getmtime)
     if not ps:
@@ -137,6 +146,11 @@ def prep(wd, inst):
     if not os.path.exists(mem):
         shutil.copy(inst["mem"], mem)
     alloc = ""
+    if inst.get("alloc"):
+        alloc = os.path.join(wd, os.path.basename(inst["alloc"]))
+        if not os.path.exists(alloc):
+            shutil.copy(inst["alloc"], alloc)
+        return dfg, mem, alloc
     a = os.path.join(inst["dir"], os.path.basename(inst["dfg"]).replace("PartPredDFG.xml", "mem_alloc.txt"))
     if os.path.exists(a):
         alloc = os.path.join(wd, os.path.basename(a))
