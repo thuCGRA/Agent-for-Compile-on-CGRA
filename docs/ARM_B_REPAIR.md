@@ -77,3 +77,28 @@ else:     routes.flex += r.suggest_edges;  rerun   # 一轮就够，实测收敛
 ```
 
 `flex` 只增不减：一轮之后 A* 拥有的边永久归 A*，再次请求时它们不算冲突。
+
+## 6. Python 侧入口
+
+`src/cgra_agent/mapper.py` 把上面这套东西包成对象：
+
+```python
+m = Mapper()                              # home 默认 /home/steve/cac-armB
+res = m.verify(spike, DFG, MEM, TRACE, ALLOC, placement, routes)
+if not res.report.ok:
+    routes.flex += res.report.suggest_edges   # 报告说放谁就放谁
+    res = m.verify(...)                        # 第二轮绿
+sim = m.simulate(res.binary, spike, TRACE, ALLOC)   # SimResult(ok, mismatches)
+```
+
+`m.repair(...)` 直接做这件事并返回每轮的 `RepairStep`。
+
+`tools/repair_demo.py` 是可直接跑的验收：19 条参考路线回放 → ok/0 mismatch；
+加 6→7 或 4→5 固定 → 一轮释放 → 又绿。当前输出：
+
+```
+A_clean19   ok=True applied=19 flex=0 sim=Mismatches::0
+B_plus_6_7  round 1 releasing [(9, 10)]   ok=True applied=19 flex=1 sim=Mismatches::0
+B_plus_4_5  round 1 releasing [(4, 5)]    ok=True applied=19 flex=1 sim=Mismatches::0
+3/3 cases green with Mismatches::0
+```
