@@ -4,6 +4,14 @@
 方向还可能相反。本文件把 10 个真实 kernel × 5 种配置（pins / k25 / k50 / k100 / rule）
 共 50 格逐格判成四类。
 
+
+> **口径更正（重要）**：本文件下面的第一版 50 格矩阵（`consistent_pass` 5 /
+> `static_disagreement` 27 / `consistent_reject` 17 / `no_mapping` 1）是在
+> `--pins_mode 3`（`PINS_REPAIR`）下取的。`PINS_REPAIR` 会把 pin 当修复提示、
+> 允许改写，因此那张表回答的是"当修复提示时能救回多少"，
+> **不是**"当硬约束时 pin 有多少能实现"。严格/偏好模式的对照见下面
+> “三个 pins mode 并列”一节。
+
 ## 判法
 
 - 每格同一份请求（同一 pins、同一 routes）跑两次：A = 不带 `--verify`，B = 带 `--verify`。
@@ -127,3 +135,37 @@
 
 所以 `hpcg`、`mults1` 在总表里标 `unverified(kernel-level)`，不参与布线结论；
 `gemm_pace` 仍需按布线问题处理（它在 II=9 才干净，说明 II=4 对它本身就很紧）。
+
+## 三个 pins mode 并列（50 格 = 10 kernel × {pins,k25,k50,k100,rule}）
+
+`LLMMapper.h` 里 `PinsMode` 有四个值：0 off / 1 strict / 2 prefer / 3 repair。
+同一批 pins+routes、同一个二进制、同一批 trace，只换 mode：
+
+| mode | consistent_pass | over_permissive | static_disagreement | consistent_reject | no_mapping |
+|---|---|---|---|---|---|
+| 1 strict | 5 | 0 | 19 | 12 | 14 |
+| 2 prefer | 5 | 0 | 19 | 12 | 14 |
+| 3 repair（第一版表） | 5 | 0 | 27 | 17 | 1 |
+
+- **strict 与 prefer 逐字节相同**：50 行的 CSV `diff` 为空，pin 应用数、route 应用数、
+  二进制 sha 全部一致。在这批实例上这两档没有区别，只有 repair 会改行为。
+- repair 的差别体现在两处：`no_mapping` 14 → 1（rule 行与 gemm_pace 的行被救回来），
+  以及 `static_disagreement` 19 → 27（救回来的解里有一批被 verify 拒）。
+- 所以“pin 是硬约束时 LLM 的 pin 有多少能实现”这个问题，看 19/12/14 这一列；
+  “pin 当修复提示时能救回多少”看 27/17/1。两张表不能混算比例。
+
+## rule 行的方差（4 次重复）
+
+`tools/rulevar.py`，每个 kernel 用同一份 cheap placement（`t = ASAP % II`，内存节点放 bank）
+跑 4 次，记录 (verify, sim verdict, cell)：
+
+| mode | 4 次结论是否翻转 | 说明 |
+|---|---|---|
+| 2 prefer | 0/10 翻转（全部 `no_mapping`） | cheap placement 在硬约束下**根本映射不出来**：pins 只被接受 12/20…28/49，且最终无二进制 |
+| 3 repair | 8/8 格翻转（确定性探针） | repair 允许改写 pin，mapper 进入非确定性搜索 |
+
+结论要分两层写：
+1. **cheap placement 的 pins 在 strict/prefer 下不可实现**（这不是"更慢"，是 `no_mapping`），
+   与 LLM 放置的 4/10 strict 成功率属同一类现象；
+2. 之前观测到的 `rule` 行不确定性是 **repair 模式的性质**，不是 cheap placement 本身的性质。
+   引用 `rule` 行数字时必须写明 mode。

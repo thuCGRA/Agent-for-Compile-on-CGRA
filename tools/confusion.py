@@ -33,7 +33,7 @@ KERNELS = os.environ.get(
     "KERNELS_ENV", "array_add,array_cond,conv2d,conv3,gemm,gemm_pace,hpcg,mac,mults1,trmm"
 ).split(",")
 PINS_MODE = int(os.environ.get("PINS_MODE_ENV", "2"))
-OUT = "work/armB/confusion"
+OUT = os.environ.get("OUT_ENV", "work/armB/confusion")
 SRC = "work/armB/fixii"
 
 

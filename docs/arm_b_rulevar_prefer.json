@@ -1,0 +1,302 @@
+[
+ {
+  "kernel": "array_add",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "array_cond",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "conv2d",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "conv3",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "gemm",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "gemm_pace",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "hpcg",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "mac",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "mults1",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ },
+ {
+  "kernel": "trmm",
+  "reps": 4,
+  "cells": {
+   "no_mapping": 4
+  },
+  "flips": false,
+  "detail": [
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ],
+   [
+    false,
+    "no-sim",
+    "no_mapping"
+   ]
+  ]
+ }
+]
