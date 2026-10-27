@@ -62,6 +62,30 @@ def find_binary(job: JobDir, dfg: Optional[str] = None) -> str:
     return best
 
 
+def check_artifacts(report: MapReport, binary: str, run: RunResult) -> MapReport:
+    """The mapper can claim success and then die before writing a bitstream.
+
+    Such a crash is the toolchain's fault, not the arm's: mark it ``toolchain``
+    so the pipeline aborts instead of charging a placement/route failure and
+    re-asking the model.
+    """
+    if report.ok and not (binary and os.path.exists(binary)):
+        report.ok = False
+        report.failure_class = "toolchain"
+        report.error = "mapper reported ok but wrote no bitstream"
+        return report
+    if report.ok:
+        return report
+    if run.rc < 0 and not run.timed_out:
+        report.failure_class = "toolchain"
+        if not report.error:
+            report.error = "mapper terminated by signal (rc=%d)" % run.rc
+        return report
+    stage = (report.stage or "").lower()
+    report.failure_class = {"placement": "semantic", "route": "runtime"}.get(stage, "")
+    return report
+
+
 def run_mapper(
     job: JobDir,
     *,
@@ -140,6 +164,9 @@ def run_mapper(
 
     binary = find_binary(job, dfg)
     sha = JobDir.sha256(binary) if binary else ""
+    report.binary = binary
+    report.binary_sha256 = sha
+    check_artifacts(report, binary, run)
     return MapperOutcome(
         report=report,
         run=run,

@@ -105,6 +105,7 @@ def _map_summary(out: MapReport) -> Dict[str, Any]:
     return {
         "ok": mp.ok,
         "stage": mp.stage,
+        "failure_class": mp.failure_class,
         "ii": mp.ii,
         "lat": mp.lat,
         "pins_total": mp.pins_total,
@@ -559,6 +560,16 @@ class Pipeline:
                 break
             last_map = out
             record["map"] = _map_summary(out)
+            if out.failure_class == "toolchain":
+                # 工具链自身崩溃：不计入任何一方的 placement/route 错误率，直接中止。
+                attempts.append(record)
+                error = "S5 toolchain: %s" % (out.error or "mapper crashed")
+                cdd = CDD(layer="failure", root_cause=(out.error or "")[:300],
+                          action="abort", evidence=[out.error or ""],
+                          confidence=0.9, failure_class="toolchain")
+                self._say("S5", "TOOLCHAIN FAILURE (not counted): %s"
+                          % (out.error or "")[:160])
+                break
             if not out.ok:
                 attempts.append(record)
                 bucket = "placement" if out.stage == "placement" else "route"

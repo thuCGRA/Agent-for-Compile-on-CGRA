@@ -152,6 +152,57 @@ report 写 ok 但没有 bitstream；已作为工具链 bug 记录，不影响结
 同一 II 内的放置/布线成功率。要让 pin 改变 II，得先改 RecMin 的算法（例如允许它向上/向下试探），
 那是工具链改动，不是布局提示能做的事。
 
+### 2.5 同 II 下的可布性：pin 到底买到什么（固定 II=4）
+
+数据不新跑，直接把 §2.2 的 II=4 行重排：`work/eval-density/density.json` →
+`scripts/analyze_density.py` → `work/eval-density/same_ii.csv`（每 kernel×rule×k 一行，
+含 `mappable`、`first_call_ok`、`lat`、`pins_applied`、`mapper_time_s`、`failure_stage`）。
+mapper 会把 II 下限提到 RecMin，所以 `gemm_pace` 的实际 target 是 **9**（其余 4），表按实际 II 标。
+
+`ok`=第一次 mapper 调用就过；`ok*`=strict 首调失败、repair 第二次才过；`FAIL`=两次都没过；
+`—`=放置器在 II=4 压根放不下（没有 mapper 调用）；`base` 行为 `-m 0`：
+
+| kernel | base | degree 25/50/100 | critical 25/50/100 | bank 25/50/100 |
+|---|---|---|---|---|
+| array_add | ok | ok / ok / ok | ok / ok / ok | ok / ok / ok |
+| gemm | ok | — / — / — | — / — / — | — / — / — |
+| hpcg | ok | ok / ok / ok* | ok / ok / ok* | ok / FAIL / ok* |
+| trmm | ok | ok / ok / ok | ok / ok / ok | ok / ok / ok |
+| array_cond | ok | ok / ok / ok* | ok / ok / ok* | ok / ok / ok* |
+| mac | ok | ok / ok / ok* | FAIL / ok / ok* | ok / ok / ok* |
+| mults1 | ok | ok / ok / ok* | ok / ok / ok* | ok / ok / ok* |
+| conv3 | ok | ok / ok / ok* | ok / ok / ok* | ok / ok / ok* |
+| conv2d | ok | ok / ok / ok* | ok / ok / ok* | ok / ok / ok* |
+| gemm_pace | ok | ok / ok / ok* | ok / ok / ok* | ok / ok / ok* |
+
+聚合（分母 = 该档真正发生 mapper 调用的 kernel 数，gemm 因放置器放不下被排除）：
+
+| rule | k | 可布 (ok/calls) | 首调即过 | 平均 mapper 时间 | lat vs base（好/平/差） |
+|---|---|---|---|---|---|
+| degree | 25% | 9/9 | 9/9 | 6.3s | 1 / 2 / 6 |
+| degree | 50% | 9/9 | 9/9 | 4.1s | 2 / 2 / 5 |
+| degree | 100% | 9/9 | 2/9 | 12.2s | 0 / 0 / 9 |
+| critical | 25% | 8/9 | 8/9 | 3.1s | 0 / 7 / 1 |
+| critical | 50% | 9/9 | 9/9 | 5.4s | 0 / 6 / 3 |
+| critical | 100% | 9/9 | 2/9 | 12.3s | 0 / 0 / 9 |
+| bank | 25% | 9/9 | 9/9 | 4.4s | 0 / 3 / 6 |
+| bank | 50% | 8/9 | 8/9 | 3.6s | 0 / 2 / 6 |
+| bank | 100% | 9/9 | 2/9 | 12.6s | 0 / 0 / 9 |
+
+结论（对「布局=可布性」这个假设）：
+
+* **II=4 下 pin 没有扩大可布集合**。基线 10/10 全部可映射；25–50% 档也没有映射出任何一个
+  基线映射不了的 kernel（gemm 除外，见下）；100% strict 反而只有 2/9 首调成功。
+  在这批 kernel 上，「LLM 买可布性」**不成立**——至少不能靠 4x4、RecMin II=4 的数据证明。
+* **全量 pin 的代价是首调成功率与时间**：strict 2/9，repair 虽把可布拉回 9/9，但平均 mapper
+  时间 12.2–12.6s，是 25–50% 档的 2–3 倍；lat 在 9/9 上全部劣于基线（与 §2.2 一致）。
+* **25–50% 是「不亏可布性」的控制旋钮**：首调成功率 8–9/9（两处单次失败：hpcg bank-50、
+  mac critical-25），时间与基线同量级；lat 大多持平或略差，只有 degree-50% 有 2 个赢
+  （array_add 11→9、conv3 13→12），但它也有 5 个更差——仍是「钉哪几个」的问题，不是「钉多少」。
+* **唯一可能真有可布性价值的是 gemm**：`-m 0` 能映射（II=4 lat=13），但我们的贪心参考布局
+  在 II=4 放不下 26 个节点/4 个相位（三规则都报 `placement_infeasible`），所以表里是 `—`。
+  如果真模型能在 II=4 放出合法布局而映射成功，那才是「布局买到可布性」——这需要真模型数据。
+
 ## 3. 管线与设计决策
 
 ```
@@ -184,6 +235,14 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
   `<kernel>_trace_*.txt`；(c) 报错并写明需要 `gcc-multilib libc6-dev-i386`。禁止引用外部 marl 目录。
 * **槽位化**：`placers/__init__.py` 与 `routers/__init__.py` 是工厂；pipeline 只依赖
   `interfaces.Placer`/`Router` 协议。A 臂专属与共享工具的分界见 `docs/ARM_A_MODULES.md`。
+* **尺寸无关的布局导出**（B 臂用）：`cli export-placement --dfg ... --arch ... --placer greedy
+  --ii 4 --export-placement out/pins.json`。xdim/ydim 全部来自 arch JSON（PE 列表），同一生成器可跑
+  4x4/3x3/3x2；失败时写 `{"status":"placement_infeasible","error":...}` 并退出 2（不是空 pins 糊过去）。
+  也接受 B 文档里的无子命令写法 `cli --dfg ... --export-placement ...`。
+* **工具链失败不计入臂的错误率**：`run_mapper` 在「report 说 ok 但没有 bitstream」或「rc<0 崩溃」时
+  设 `failure_class="toolchain"`、`ok=False`；pipeline 见到 toolchain 直接 abort，不占
+  placement/route 桶、不再重问，CDD 记 `layer="failure"`。`failure_class` 取值
+  `static|runtime|semantic|toolchain`（见 `interfaces.MapReport`/`CDD`）。
 * **Router 契约定稿**（父代理批准改一次）：
   `route(placement: Placement, facts: dict, arch: dict, ii: int, budget: dict) -> MapReport`，
   5 个位置参数、无关键字别名。`facts["paths"] = {"dfg","arch_json","mem_alloc","workdir"}`
@@ -211,7 +270,9 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
 8. **mapper 不接受低于 RecMin 的 II**（§2.4）：`-i 3` 会被 `max(UserGiven, RecMin)` 提升到 4/9，
    且 method 3 也不跳 II。pinned 实验如果想考察「同 II 内的布线成功率」，必须在 RecMin 及以上做。
 9. `mults1 critical 50%` 触发 mapper 内部断言崩溃（`PathFinderMapper.cpp:3871`），report 声称 ok
-   但无 bitstream；工具链 bug，不修。
+   但无 bitstream；工具链 bug，不修。A 侧已用 `failure_class="toolchain"` 把它挡在错误率之外。
+10. §2.5 的 gemm 行没有 pinned 数据：贪心参考布局在 II=4 放不下（`placement_infeasible`），
+    不是 pin 失败；补测需要真模型或更强的放置器。
 
 ## 5. benchmark 集合（替换 md/stencil/spmv）
 

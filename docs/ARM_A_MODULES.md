@@ -14,6 +14,18 @@ pipeline 只通过工厂拿实现，不直接 import 具体类：
 
 CLI 对应 `--placer {llm,greedy,fixed}` 与 `--router pathfinder`。
 
+另有一个与臂无关的导出命令（B 臂跨尺寸对比用）：
+
+```
+python -m cgra_agent.cli export-placement --dfg <DFG.xml> --arch <arch.json>
+        --placer greedy --ii 4 --export-placement out/pins.json
+```
+
+尺寸（xdim/ydim/PE 列表）全部来自 arch JSON；失败时文件里写
+`{"status": "placement_infeasible", "error": ...}` 且退出码 2，不产出空 pins。
+
+ad-hoc shell 脚本放在 `/home/steve/cac_scripts/armA/`（`cac_scripts/` 根目录两臂共用，勿混放）。
+
 ## 2. 文件归属
 
 **A 臂专属（合并时随臂走）**
@@ -59,3 +71,17 @@ CLI 对应 `--placer {llm,greedy,fixed}` 与 `--router pathfinder`。
   - 返回的 `MapReport` 带 `binary` 与 `binary_sha256`（router 负责写 bitstream，
     pipeline 只按字段取文件），`pins_applied` 是 mapper 内部多轮尝试的累计值
     （`pin_attempts` 别名，非去重节点数）。
+
+### 失败分类（`failure_class`）
+
+`MapReport.failure_class` / `CDD.failure_class` 取值 `static | runtime | semantic | toolchain`：
+
+- `toolchain`：mapper 自身崩溃或「说 ok 但没有 bitstream」。`tools/mapper.py::check_artifacts`
+  统一把 `ok=True` 且无 `*_binary.bin` 的情况改成 `ok=False, failure_class="toolchain"`，
+  `rc<0`（超时除外）同样归此类。
+- pipeline 遇到 `toolchain` 直接 abort：不占 validate/placement/route 桶，不再重问，CDD 记
+  `layer="failure"`。这样工具链的崩溃不会计入任何一臂的失败率。
+- `placement` 阶段失败 = `semantic`，`route` 阶段失败 = `runtime`；其余（validator 拒绝）由
+  pipeline 自己归因。
+
+回归用例：`tests/test_mapper.py`（ok+无 bitstream、ok+有 bitstream、信号、阶段分类）。

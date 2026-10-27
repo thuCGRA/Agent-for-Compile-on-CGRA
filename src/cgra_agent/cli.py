@@ -146,6 +146,79 @@ def cmd_facts(args) -> int:
     return EXIT_OK
 
 
+def cmd_export_placement(args) -> int:
+    """Export a size-independent placement (arch dims from the arch JSON).
+
+    B uses this on 3x3/3x2/4x4 to compare the same generator across sizes.
+    """
+    from .placers import make_placer
+    from .placers.greedy import GreedyError
+    from .tools.facts import build_facts, parse_arch
+
+    arch = parse_arch(args.arch)
+    ii = args.ii or int(arch.get("init_ii") or 4)
+    facts = build_facts(args.dfg, args.arch, ii)
+    ii = max(ii, int(facts["min_ii"]))
+    if ii != facts["ii"]:
+        from .tools.facts import facts_for_ii
+
+        facts = facts_for_ii(facts, ii)
+    try:
+        placer = make_placer(args.placer, seed=args.seed)
+    except ToolError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return EXIT_FAIL
+    out = {
+        "status": "ok",
+        "pins": [],
+        "ii": ii,
+        "source": getattr(placer, "name", args.placer),
+        "arch": {"xdim": facts["xdim"], "ydim": facts["ydim"]},
+        "pe_mem": facts["pe_mem"],
+    }
+    try:
+        placement = placer.place(facts, arch, ii, {})
+    except GreedyError as exc:
+        out.update(status="placement_infeasible", error=str(exc)[:600])
+        with open(args.export_placement, "w") as f:
+            json.dump(out, f, indent=2)
+            f.write("\n")
+        print(
+            "placement_infeasible: %s (wrote %s)" % (str(exc)[:300], args.export_placement),
+            file=sys.stderr,
+        )
+        return EXIT_UNVERIFIED
+    pins = [{"node": p.node, "x": p.x, "y": p.y, "t": p.t} for p in placement.pins]
+    from .tools.validate import validate
+
+    val = validate(facts, pins, ii, require_complete=True)
+    out.update(
+        pins=pins,
+        note=placement.note,
+        n_nodes=facts["n_nodes"],
+        pins_complete=not val["errors"],
+        validate_errors=val["errors"][:8],
+        validate_warnings=val["warnings"][:6],
+    )
+    with open(args.export_placement, "w") as f:
+        json.dump(out, f, indent=2)
+        f.write("\n")
+    print(
+        "exported %d pin(s) for %dx%d II=%d (%s)%s -> %s"
+        % (
+            len(pins),
+            facts["xdim"],
+            facts["ydim"],
+            ii,
+            out["source"],
+            "" if not val["errors"] else "; validator: " + val["errors"][0][:120],
+            args.export_placement,
+        ),
+        file=sys.stderr if val["errors"] else sys.stdout,
+    )
+    return EXIT_OK if not val["errors"] else EXIT_UNVERIFIED
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cgra_agent", description="Arm A: LLM placement + PathFinder routing")
     p.add_argument("--repo-root", default=default_repo_root())
@@ -210,13 +283,36 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--ii", type=int, default=None)
     f.add_argument("--work", default="work/facts")
     f.set_defaults(func=cmd_facts)
+
+    e = sub.add_parser(
+        "export-placement",
+        help="export a fixed placement for B (dfg+arch in, pins.json out; -m 3 strict)",
+    )
+    e.add_argument("--dfg", required=True, help="PartPred DFG xml")
+    e.add_argument("--arch", required=True, help="arch JSON (xdim/ydim come from here)")
+    e.add_argument("--placer", default="greedy", choices=["llm", "greedy", "fixed"])
+    e.add_argument("--seed", type=int, default=0)
+    e.add_argument("--ii", type=int, default=None, help="target II (default 4, floored at ResMin)")
+    e.add_argument(
+        "--export-placement",
+        required=True,
+        metavar="OUT.json",
+        help="path of the pins.json to write; status=placement_infeasible on failure",
+    )
+    e.set_defaults(func=cmd_export_placement)
     return p
 
 
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # B's documented form is `cli --dfg ... --export-placement out/pins.json`
+    # (no subcommand).  Route it to the subparser instead of requiring a word.
+    if argv and argv[0].startswith("-") and "--export-placement" in argv:
+        argv = ["export-placement"] + argv
     args = build_parser().parse_args(argv)
     return int(args.func(args))
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
