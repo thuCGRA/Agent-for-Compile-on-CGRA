@@ -19,10 +19,10 @@ index 2877e32..19070d6 100755
  
 diff --git a/include/morpher/mapper/LLMMapper.h b/include/morpher/mapper/LLMMapper.h
 new file mode 100755
-index 0000000..fb2fd27
+index 0000000..836a7fc
 --- /dev/null
 +++ b/include/morpher/mapper/LLMMapper.h
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,173 @@
 +/*
 + * LLMMapper.h
 + *
@@ -165,6 +165,16 @@ index 0000000..fb2fd27
 +						   int startLat, int endLat, std::vector<LatPort> &path);
 +	void checkPortOveruse();
 +
++	// The simulator asserts on two operand-side situations that the port graph
++	// hides, so they are checked here instead of being discovered by a crash:
++	//  - SELECT takes exactly one valid operand (CGRATile.cpp:175)
++	//  - an input register receives at most one value per cycle (CGRATile.cpp:352)
++	void checkOperandExclusivity(DFG *dfg);
++	void checkInputExclusivity();
++
++	// arrival cycle of the value an edge delivers, keyed by (from node, to node)
++	std::map<std::pair<int, int>, int> edgeArrival;
++
 +	std::map<int, PlacementPin> pins;
 +	std::map<std::pair<int, int>, RouteHint> routeHints;
 +	std::set<std::pair<int, int>> flexEdges;
@@ -304,10 +314,10 @@ index 135f487..8df214e 100755
 \ No newline at end of file
 diff --git a/src/mapper/LLMMapper.cpp b/src/mapper/LLMMapper.cpp
 new file mode 100755
-index 0000000..63f62e4
+index 0000000..b9cc2ab
 --- /dev/null
 +++ b/src/mapper/LLMMapper.cpp
-@@ -0,0 +1,1168 @@
+@@ -0,0 +1,1372 @@
 +/*
 + * LLMMapper.cpp
 + *
@@ -1173,6 +1183,177 @@ index 0000000..63f62e4
 +	}
 +}
 +
++// SELECT must see exactly one valid operand in the cycle it executes
++// (CGRATile.cpp:175 asserts !(I1isvalid && I2isvalid)).  The port graph cannot
++// see this: both operands travel through different input ports, so the route
++// search happily delivers both in the same cycle.  Statically decidable from the
++// mapping: it is a conflict exactly when two operand edges of the same SELECT
++// node arrive in the same cycle.
++void LLMMapper::checkOperandExclusivity(DFG *dfg)
++{
++	for (size_t i = 0; i < dfg->nodeList.size(); ++i)
++	{
++		DFGNode *n = &dfg->nodeList[i];
++		if (n->rootDP == NULL || n->op != "SELECT")
++		{
++			continue;
++		}
++		std::map<int, std::vector<int>> byCycle; // arrival cycle -> parent nodes
++		const bool dbgSel = getenv("LLM_DEBUG_SEL") != NULL;
++		for (size_t k = 0; k < n->parents.size(); ++k)
++		{
++			DFGNode *p = n->parents[k];
++			if (p == NULL)
++			{
++				continue;
++			}
++			std::map<std::pair<int, int>, int>::iterator ai =
++				edgeArrival.find(std::make_pair((int)p->idx, (int)n->idx));
++			if (ai == edgeArrival.end())
++			{
++				continue;
++			}
++			byCycle[ai->second].push_back((int)p->idx);
++			if (dbgSel)
++			{
++				std::cout << "[sel] node " << n->idx << " <- " << p->idx << " arrives cycle "
++						  << ai->second << " (exec " << n->rootDP->getLat() << ")\n";
++			}
++		}
++		for (std::map<int, std::vector<int>>::iterator c = byCycle.begin(); c != byCycle.end(); ++c)
++		{
++			if (c->second.size() < 2)
++			{
++				continue;
++			}
++			std::string nodes;
++			for (size_t q = 0; q < c->second.size(); ++q)
++			{
++				nodes += " " + strint(c->second[q]);
++			}
++			PE *pe = n->rootDP->getPE();
++			MapConflict &cf = addConflict("op", pe ? pe->X : -1, pe ? pe->Y : -1, c->first,
++										  c->second[0], (int)n->idx, "",
++										  "SELECT node " + strint((int)n->idx) + " gets both operands in cycle " +
++											  strint(c->first) + " (from nodes" + nodes + ")");
++			// the operand that can still afford to arrive later is the one with slack
++			int bestSlack = -1;
++			for (size_t q = 0; q < c->second.size(); ++q)
++			{
++				std::pair<int, int> e = std::make_pair(c->second[q], (int)n->idx);
++				cf.edgeList.push_back(e);
++				std::map<std::pair<int, int>, int>::iterator si = edgeSlack.find(e);
++				int slack = (si == edgeSlack.end()) ? 0 : si->second;
++				bool flex = isFlexEdge(e.first, e.second);
++				if (flex)
++				{
++					cf.suggest = e;
++					cf.suggestAction = "reroute";
++					break;
++				}
++				if (slack > bestSlack)
++				{
++					cf.suggest = e;
++					cf.suggestAction = "flex";
++					bestSlack = slack;
++				}
++			}
++			if (cf.suggest.first >= 0 &&
++				std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++			{
++				suggestEdges.push_back(cf.suggest);
++			}
++		}
++	}
++}
++
++// An input register takes one value per cycle (CGRATile.cpp:352/358/364 assert
++// the register is empty before it is overwritten).  The operand registers are
++// REGI ports, which checkPortOveruse() deliberately skips because they legitimately
++// hold different values over time; per cycle they are still exclusive, so grouping
++// by source and cycle catches the double write.  Same source twice in a cycle is a
++// broadcast of one value, which is legal.
++void LLMMapper::checkInputExclusivity()
++{
++	unordered_set<PE *> allPEs = cgra->getAllPEList();
++	for (unordered_set<PE *>::iterator it = allPEs.begin(); it != allPEs.end(); ++it)
++	{
++		std::stack<Module *> st;
++		st.push(*it);
++		while (!st.empty())
++		{
++			Module *m = st.top();
++			st.pop();
++			for (size_t i = 0; i < m->inputPorts.size(); ++i)
++			{
++				Port *p = m->inputPorts[i];
++				if (p->getType() != REGI || p->mapped_nodes.size() < 2)
++				{
++					continue;
++				}
++				std::map<int, std::set<int>> perCycle;
++				for (size_t k = 0; k < p->mapped_nodes.size(); ++k)
++				{
++					DFGNode *n = std::get<0>(p->mapped_nodes[k]);
++					perCycle[std::get<2>(p->mapped_nodes[k])].insert((int)n->idx);
++				}
++				for (std::map<int, std::set<int>>::iterator c = perCycle.begin(); c != perCycle.end(); ++c)
++				{
++					if (c->second.size() < 2)
++					{
++						continue;
++					}
++					std::string nodes;
++					for (std::set<int>::iterator e = c->second.begin(); e != c->second.end(); ++e)
++					{
++						nodes += " " + strint(*e);
++					}
++					PE *pe = p->getMod()->getPE();
++					MapConflict &cf = addConflict("op", pe ? pe->X : -1, pe ? pe->Y : -1, c->first,
++												  *c->second.begin(), -1, p->getFullName(),
++												  "input register " + p->getFullName() +
++													  " would be written by two different values in cycle " +
++													  strint(c->first) + " (nodes" + nodes + ")");
++					int bestSlack = -1;
++					for (size_t q = 0; q < p->mapped_nodes.size(); ++q)
++					{
++						if (std::get<2>(p->mapped_nodes[q]) != c->first)
++						{
++							continue;
++						}
++						std::pair<int, int> e = std::make_pair((int)std::get<0>(p->mapped_nodes[q])->idx,
++															   std::get<1>(p->mapped_nodes[q]));
++						cf.edgeList.push_back(e);
++						std::map<std::pair<int, int>, int>::iterator si = edgeSlack.find(e);
++						int slack = (si == edgeSlack.end()) ? 0 : si->second;
++						if (isFlexEdge(e.first, e.second))
++						{
++							cf.suggest = e;
++							cf.suggestAction = "reroute";
++							break;
++						}
++						if (slack > bestSlack)
++						{
++							cf.suggest = e;
++							cf.suggestAction = "flex";
++							bestSlack = slack;
++						}
++					}
++					if (cf.suggest.first >= 0 &&
++						std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++					{
++						suggestEdges.push_back(cf.suggest);
++					}
++				}
++			}
++			for (size_t i = 0; i < m->subModules.size(); ++i)
++			{
++				st.push(m->subModules[i]);
++			}
++		}
++	}
++}
++
 +bool LLMMapper::VerifyMap(CGRA *cgra, DFG *dfg)
 +{
 +	this->cgra = cgra;
@@ -1400,6 +1581,8 @@ index 0000000..63f62e4
 +				{
 +					assignPath(src, dst, path);
 +					dumpPath((int)src->idx, (int)dst->idx, path);
++					edgeArrival[std::make_pair((int)src->idx, (int)dst->idx)] =
++						path.empty() ? startLat : path.back().first;
 +					++routesApplied;
 +				}
 +				else
@@ -1449,6 +1632,8 @@ index 0000000..63f62e4
 +			{
 +				assignPath(src, dst, path);
 +				dumpPath((int)src->idx, (int)dst->idx, path);
++				edgeArrival[std::make_pair((int)src->idx, (int)dst->idx)] =
++					path.empty() ? startLat : path.back().first;
 +			}
 +			else
 +			{
@@ -1459,7 +1644,36 @@ index 0000000..63f62e4
 +		}
 +	}
 +
++	if (getenv("LLM_DEBUG_TILE") != NULL)
++	{
++		unordered_set<PE *> allPEs = cgra->getAllPEList();
++		for (unordered_set<PE *>::iterator pit = allPEs.begin(); pit != allPEs.end(); ++pit)
++		{
++			PE *pe = *pit;
++			if (pe->X != 1 || pe->Y != 1) continue;
++			std::stack<Module *> st;
++			st.push(pe);
++			while (!st.empty())
++			{
++				Module *m = st.top();
++				st.pop();
++				for (size_t i = 0; i < m->inputPorts.size(); ++i)
++				{
++					Port *p = m->inputPorts[i];
++					if (p->mapped_nodes.empty()) continue;
++					std::cout << "[tile] " << p->getFullName() << " type=" << (int)p->getType() << "\n";
++					for (size_t k = 0; k < p->mapped_nodes.size(); ++k)
++						std::cout << "[tile]    cyc " << std::get<2>(p->mapped_nodes[k])
++								  << " src " << std::get<0>(p->mapped_nodes[k])->idx
++								  << " cons " << std::get<1>(p->mapped_nodes[k]) << "\n";
++				}
++				for (size_t i = 0; i < m->subModules.size(); ++i) st.push(m->subModules[i]);
++			}
++		}
++	}
 +	checkPortOveruse();
++	checkInputExclusivity();
++	checkOperandExclusivity(dfg);
 +	if (!conflicts.empty())
 +	{
 +		ok = false;
