@@ -1,3 +1,17 @@
+diff --git a/include/morpher/arch/Module.h b/include/morpher/arch/Module.h
+index c6cc802..eb45b67 100755
+--- a/include/morpher/arch/Module.h
++++ b/include/morpher/arch/Module.h
+@@ -45,6 +45,9 @@ public:
+ 	std::vector<Module *> subModules;
+ 
+ 	Port *getInPort(std::string Pname);
++	// verify mode asks for a port by op-type name and must be able to
++	// report "this module has no such input" instead of aborting the process
++	Port *lookupInPort(std::string Pname);
+ 	Port *getOutPort(std::string Pname);
+ 	Port *getInternalPort(std::string Pname);
+ 	Port* getSocketPort(std::string Pname);
 diff --git a/include/morpher/mapper/HeuristicMapper.h b/include/morpher/mapper/HeuristicMapper.h
 index 2877e32..19070d6 100755
 --- a/include/morpher/mapper/HeuristicMapper.h
@@ -19,28 +33,40 @@ index 2877e32..19070d6 100755
  
 diff --git a/include/morpher/mapper/LLMMapper.h b/include/morpher/mapper/LLMMapper.h
 new file mode 100755
-index 0000000..5c9d938
+index 0000000..836a7fc
 --- /dev/null
 +++ b/include/morpher/mapper/LLMMapper.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,173 @@
 +/*
 + * LLMMapper.h
 + *
 + *  A PathFinderMapper variant whose per-node candidate queue is constrained by
-+ *  an external placement hint (the "pins" produced by the python llm agent).
++ *  an external placement hint (the "pins" produced by the python agent), plus a
++ *  verify mode that builds the mapping from an external placement + route set
++ *  and only checks it (no search).
 + *
 + *  Design notes:
-+ *   - placement is decided outside, routing inside: the hint only removes or
-+ *     re-orders entries of the candidate queue that estimateRouting() built, so
-+ *     Route()/LeastCostPathAstar() are used unchanged.
-+ *   - no assert() is added on the pins path: a bad hint must produce a machine
-+ *     readable report, not a crash, because the agent loop consumes the report.
++ *   - pins mode: placement is decided outside, routing inside: the hint only
++ *     removes or re-orders entries of the candidate queue that
++ *     estimateRouting() built, so Route()/LeastCostPathAstar() are used
++ *     unchanged.
++ *   - verify mode: the placement (pins) and, optionally, the route of single
++ *     edges (coordinate paths) come from outside.  The mapper materialises the
++ *     mapping on the real port graph, honours every given route, falls back to
++ *     LeastCostPathAstar() for edges without a route, and reports conflicts
++ *     instead of asserting.
++ *   - no assert() is added on the external-input path: a bad hint must produce
++ *     a machine readable report, not a crash, because the agent loop consumes
++ *     the report.
 + */
 +
 +#include <morpher/mapper/PathFinderMapper.h>
 +
 +#include <map>
++#include <set>
 +#include <string>
++#include <utility>
++#include <vector>
 +
 +#ifndef LLMMAPPER_H_
 +#define LLMMAPPER_H_
@@ -55,6 +81,42 @@ index 0000000..5c9d938
 +	int x = -1;
 +	int y = -1;
 +	int t = -1; // phase of the PE (PE::T), i.e. absolute lat % II
++	int lat = -1; // optional absolute latency; -1 = derive from the dfg edges
++};
++
++// One externally routed edge: "path" is the sequence of PE coordinates the
++// value walks through, starting at the source PE and ending at the destination
++// PE.  The network is time-multiplexed, so the phase of a hop is not part of the
++// path: the mapper searches the port graph for a legal realisation that arrives
++// at the destination at the cycle the consumer needs it.  HyCUBE forwards
++// through a neighbour within one cycle, so a hop does not cost a whole cycle and
++// the hop count is only a lower bound on the path length.
++struct RouteHint
++{
++	int from = -1;
++	int to = -1;
++	std::vector<std::pair<int, int>> coords;
++};
++
++struct MapConflict
++{
++	std::string type;  // placement | op | timing | route | port
++	int x = -1;
++	int y = -1;
++	int cycle = -1;
++	int from = -1;
++	int to = -1;
++	std::string port;
++	std::string msg;
++	// every edge that drives this port in this cycle: a caller can decide which
++	// one to give way instead of restarting the whole route set
++	std::vector<std::pair<int, int>> edgeList;
++	// the edge we would release, and what that means for the caller:
++	//   "reroute"   it is already flexible, rerun and A* will place it
++	//   "flex"      it is fixed, add it to "flex" and rerun
++	//   "no-flex"   releasing it is not possible (it is the only edge here)
++	std::pair<int, int> suggest = std::make_pair(-1, -1);
++	std::string suggestAction;
 +};
 +
 +class LLMMapper : public PathFinderMapper
@@ -75,66 +137,121 @@ index 0000000..5c9d938
 +
 +	void setPinsFile(std::string f) { pinsFileName = f; }
 +	void setReportFile(std::string f) { reportFileName = f; }
++	void setRoutesFile(std::string f) { routesFileName = f; }
 +	void setPinsMode(PinsMode m) { pinsMode = m; }
++	void setVerifyMode(bool v) { verifyMode = v; }
++	bool isVerifyMode() const { return verifyMode; }
 +
 +	bool loadPins();
++	bool loadRoutes();
++
++	// An edge listed in the routes file's "flex" array is routed by the internal
++	// A* even when a path was given for it, so a caller that gets a port conflict
++	// can promote the suggested edge and rerun instead of rebuilding every route.
++	bool isFlexEdge(int from, int to) const
++	{
++		return flexEdges.find(std::make_pair(from, to)) != flexEdges.end();
++	}
 +
 +	// Same search as method 0, but with the pinned candidate queues; writes
 +	// reportFileName on the way out (success or failure).
 +	bool MapWithPins(CGRA *cgra, DFG *dfg);
 +
++	// Build the mapping from pins + routes, check it, do not search.
++	bool VerifyMap(CGRA *cgra, DFG *dfg);
++
 +	bool restrictDestinations(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes) override;
 +
 +private:
 +	void writeReport(bool ok, CGRA *cgra);
++	MapConflict &addConflict(const std::string &type, int x, int y, int cycle, int from, int to,
++							 const std::string &port, const std::string &msg);
++
++	// marks one edge as the thing a caller should release to make progress
++	void noteSuggest(MapConflict &cf, int from, int to, bool flexible);
++
++	bool locateDP(int x, int y, int t, DFGNode *node, DataPath **out);
++	bool dfsExplicit(int hopIdx, int hops, Port *cur, int lat, int endLat,
++					 const RouteHint &h, Port *endPort, std::vector<LatPort> &path,
++					 std::set<std::pair<Port *, int>> &seen, int depth,
++					 DFGNode *owner = NULL, int regHops = 0);
++	bool buildExplicitPath(DFGNode *src, DFGNode *dst, const RouteHint &h,
++						   int startLat, int endLat, std::vector<LatPort> &path);
++	void checkPortOveruse();
++
++	// The simulator asserts on two operand-side situations that the port graph
++	// hides, so they are checked here instead of being discovered by a crash:
++	//  - SELECT takes exactly one valid operand (CGRATile.cpp:175)
++	//  - an input register receives at most one value per cycle (CGRATile.cpp:352)
++	void checkOperandExclusivity(DFG *dfg);
++	void checkInputExclusivity();
++
++	// arrival cycle of the value an edge delivers, keyed by (from node, to node)
++	std::map<std::pair<int, int>, int> edgeArrival;
 +
 +	std::map<int, PlacementPin> pins;
++	std::map<std::pair<int, int>, RouteHint> routeHints;
++	std::set<std::pair<int, int>> flexEdges;
++	std::map<std::pair<int, int>, int> edgeSlack;
++	std::vector<std::pair<int, int>> suggestEdges;
++	int flexRerouted = 0;
++	std::vector<MapConflict> conflicts;
 +	std::string pinsFileName;
++	std::string routesFileName;
 +	std::string reportFileName;
 +	PinsMode pinsMode = PINS_OFF;
++	bool verifyMode = false;
 +	int pinsApplied = 0;
 +	int pinsRejected = 0;
++	int routesApplied = 0;
++	int routesRejected = 0;
 +};
 +
 +} /* namespace CGRAXMLCompile */
 +
 +#endif /* LLMMAPPER_H_ */
 diff --git a/include/morpher/util/util.h b/include/morpher/util/util.h
-index ed23030..735d403 100755
+index ed23030..1a70e56 100755
 --- a/include/morpher/util/util.h
 +++ b/include/morpher/util/util.h
-@@ -47,6 +47,9 @@ struct arguments
+@@ -47,6 +47,11 @@ struct arguments
  	bool synthetic_dfg = false;
  	bool print_stat = false;
  	bool morpher_light = false;
 +	std::string pins_file = "";   // placement hint produced by the llm agent
 +	int pins_mode = 0;             // 0 off, 1 strict, 2 prefer
 +	std::string report_file = ""; // machine readable result
++	std::string routes_file = ""; // externally routed edges (llm routing)
++	bool verify = false;          // materialise pins+routes and only check them
  	lisa_arguments lisa_arg;
  };
  
-@@ -146,6 +149,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
+@@ -146,6 +151,11 @@ inline arguments parse_arguments(int argn, char *argc[]){
  		.add_option<bool>("-p", "--print_stat", "printing status", false)
  		.add_option<bool>("", "--morpher_light", "morpher light version, will use quick mapper", false)
  		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
 +        .add_option<std::string>("", "--pins", "pins json (llm placement)", "")
 +        .add_option<int>("", "--pins_mode", "0=off,1=strict,2=prefer", 0)
 +        .add_option<std::string>("", "--report", "machine readable report json", "")
++        .add_option<std::string>("", "--routes", "externally routed edges json (llm routing)", "")
++        .add_option<bool>("", "--verify", "materialise the external pins+routes and only verify", false)
          .parse(argn, argc);
  
  	ret.dfg_filename = args.get_option<std::string>("--dfg");
-@@ -165,6 +171,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
+@@ -165,6 +175,11 @@ inline arguments parse_arguments(int argn, char *argc[]){
  	ret.use_json = true;
  	ret.print_stat = args.get_option<bool>("--print_stat");
  	ret.morpher_light = args.get_option<bool>("--morpher_light");
 +	ret.pins_file = args.get_option<std::string>("--pins");
 +	ret.pins_mode = args.get_option<int>("--pins_mode");
 +	ret.report_file = args.get_option<std::string>("--report");
++	ret.routes_file = args.get_option<std::string>("--routes");
++	ret.verify = args.get_option<bool>("--verify");
  	ret.arch_name = args.get_option<std::string>("--arch_name");
  	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");
  	lisa_arg.training = args.get_option<bool>("--lisa_training");
 diff --git a/src/CGRA_xml_compiler.cpp b/src/CGRA_xml_compiler.cpp
-index 135f487..c412406 100755
+index 135f487..8df214e 100755
 --- a/src/CGRA_xml_compiler.cpp
 +++ b/src/CGRA_xml_compiler.cpp
 @@ -27,6 +27,7 @@
@@ -145,7 +262,7 @@ index 135f487..c412406 100755
  using namespace std;
  using namespace CGRAXMLCompile;
  
-@@ -91,6 +92,12 @@ int main(int argn, char *argc[])
+@@ -91,6 +92,18 @@ int main(int argn, char *argc[])
  		mapper = new SAMapper(inputDFG_filename);
  	}else if(mapping_method  == 2){
  		mapper = new LISAMapper(inputDFG_filename);
@@ -154,17 +271,25 @@ index 135f487..c412406 100755
 +		llm_mapper->setPinsFile(args.pins_file);
 +		llm_mapper->setPinsMode((LLMMapper::PinsMode)args.pins_mode);
 +		llm_mapper->setReportFile(args.report_file);
++		llm_mapper->setRoutesFile(args.routes_file);
++		llm_mapper->setVerifyMode(args.verify);
++		if (args.verify)
++		{
++			std::cout << "[verify] external placement + routes mode (no search)\n";
++		}
 +		mapper = llm_mapper;
  	}else{
  		assert(false && "did not set a valid mapping method");
  	}
-@@ -173,14 +180,30 @@ int main(int argn, char *argc[])
+@@ -173,14 +186,32 @@ int main(int argn, char *argc[])
  				// this is genreatring traning data. No need to dump results;
  				return 0;
  			}
 +		}else if(mapping_method  == 3){
 +			LLMMapper * llm_mapper = static_cast<LLMMapper*>(mapper);
-+			mappingSuccess = llm_mapper->MapWithPins(tempCGRA, &tempDFG);
++			mappingSuccess = llm_mapper->isVerifyMode()
++								 ? llm_mapper->VerifyMap(tempCGRA, &tempDFG)
++								 : llm_mapper->MapWithPins(tempCGRA, &tempDFG);
  		}else{
  			assert(false && "did not set a valid mapping method");
  		}
@@ -189,7 +314,7 @@ index 135f487..c412406 100755
  			for (DFGNode &node : currDFG.nodeList)
  			{
  				assert(node.rootDP == NULL);
-@@ -240,5 +263,10 @@ int main(int argn, char *argc[])
+@@ -240,5 +271,10 @@ int main(int argn, char *argc[])
  	result_file.close();
  	 
  
@@ -201,23 +326,49 @@ index 135f487..c412406 100755
  	return 0;
  }
 \ No newline at end of file
+diff --git a/src/arch/Module.cpp b/src/arch/Module.cpp
+index eea45fe..dac0186 100755
+--- a/src/arch/Module.cpp
++++ b/src/arch/Module.cpp
+@@ -606,6 +606,18 @@ CGRAXMLCompile::Port *CGRAXMLCompile::Module::getInPort(std::string Pname)
+ 	assert(false);
+ }
+ 
++CGRAXMLCompile::Port *CGRAXMLCompile::Module::lookupInPort(std::string Pname)
++{
++	for (Port *p : inputPorts)
++	{
++		if (p->getName().compare(Pname) == 0)
++		{
++			return p;
++		}
++	}
++	return NULL;
++}
++
+ CGRAXMLCompile::Port *CGRAXMLCompile::Module::getOutPort(std::string Pname)
+ {
+ 	for (Port *p : outputPorts)
 diff --git a/src/mapper/LLMMapper.cpp b/src/mapper/LLMMapper.cpp
 new file mode 100755
-index 0000000..b8e4d7c
+index 0000000..63143f1
 --- /dev/null
 +++ b/src/mapper/LLMMapper.cpp
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,1391 @@
 +/*
 + * LLMMapper.cpp
 + *
-+ *  See LLMMapper.h.  The only behavioural change with respect to
-+ *  PathFinderMapper::Map() is the restrictDestinations() hook that is called
-+ *  from PathFinderMapper::Map() right after estimateRouting() succeeded.
++ *  See LLMMapper.h.  Two modes:
++ *   - pins mode (MapWithPins): PathFinderMapper::Map() with restrictDestinations()
++ *     pruning the candidate queues to the externally given placement.
++ *   - verify mode (VerifyMap): the mapping is materialised from the external
++ *     placement + routes, then checked.  No search over placements.
 + */
 +
 +#include <morpher/mapper/LLMMapper.h>
 +#include <morpher/arch/json.hpp>
 +
++#include <algorithm>
 +#include <fstream>
 +#include <iostream>
 +#include <vector>
@@ -228,7 +379,67 @@ index 0000000..b8e4d7c
 +// big enough to lift a pinned candidate above any real routing cost
 +static const int PIN_COST_BONUS = 1000000;
 +
++// A route may wait in a pipeline register, but only for a short while: the
++// binary printer encodes a single registered hop, not an arbitrary walk through
++// the register file, so a path that parks the value in TREG/ER for many cycles
++// maps fine and then cannot be emitted.
++// How many cycles a routed value may spend in register files on its way.
++// HyCUBE's binary encoding can only express a bounded wait, so the DFS has to
++// refuse longer ones; the baseline mapping needs up to 5 for the 4->5 edge, so
++// the bound is a knob (LLM_REG_HOP_CAP) with a safe default rather than a guess.
++static int regHopCap()
++{
++	static int cap = -1;
++	if (cap < 0)
++	{
++		const char *env = getenv("LLM_REG_HOP_CAP");
++		// 2 keeps every accepted route inside the register chain the binary
++		// encoding can express; longer waits print a mapping the simulator then
++		// disagrees with (measured: cap 12 -> 20 mismatches), so a route that
++		// needs more is reported as unrealisable instead of being accepted
++		cap = env ? atoi(env) : 2;
++		if (cap < 0)
++		{
++			cap = 2;
++		}
++	}
++	return cap;
++}
++
++
++// The op->port table the DFG carries names the operand slot ("I1"/"I2"/"P"),
++// while a PE data-path module prefixes it ("DP0_I1"). Try the bare name first,
++// then the prefixed one, and let the caller report a conflict if neither exists.
++static CGRAXMLCompile::Port *lookupDestPort(CGRAXMLCompile::DFGNode *src, CGRAXMLCompile::DFGNode *dst)
++{
++	if (dst == NULL || dst->rootDP == NULL)
++	{
++		return NULL;
++	}
++	std::string name = src->getOPtype(dst);
++	CGRAXMLCompile::Port *p = dst->rootDP->lookupInPort(name);
++	if (p != NULL)
++	{
++		return p;
++	}
++	return dst->rootDP->lookupInPort("DP0_" + name);
++}
++
 +static std::string strint(int v) { return std::to_string(v); }
++
++// prints the realised port path of one edge; the spike uses it to compare the
++// injected route against what the toolchain would have chosen
++static void dumpPath(int from, int to, const std::vector<LatPort> &path)
++{
++	std::cout << "[route] " << from << "->" << to << " (" << path.size() << " ports):";
++	for (size_t i = 0; i < path.size(); ++i)
++	{
++		std::cout << " t" << path[i].first << ":" << path[i].second->getFullName();
++	}
++	std::cout << "\n";
++}
++
++// ---------------------------------------------------------------- loading
 +
 +bool LLMMapper::loadPins()
 +{
@@ -274,6 +485,7 @@ index 0000000..b8e4d7c
 +		pin.x = p->value("x", -1);
 +		pin.y = p->value("y", -1);
 +		pin.t = p->value("t", -1);
++		pin.lat = p->value("lat", -1);
 +		if (pin.node < 0 || pin.x < 0 || pin.y < 0 || pin.t < 0)
 +		{
 +			std::cerr << "[pins] skipping malformed pin (need node/x/y/t >= 0)\n";
@@ -295,6 +507,92 @@ index 0000000..b8e4d7c
 +			  << " (mode=" << mode << ")\n";
 +	return true;
 +}
++
++bool LLMMapper::loadRoutes()
++{
++	if (routesFileName.empty())
++	{
++		std::cout << "[routes] no --routes given, all edges will be routed by A*\n";
++		return true;
++	}
++
++	std::ifstream in(routesFileName.c_str());
++	if (!in.is_open())
++	{
++		lastRestrictError = "cannot open routes file: " + routesFileName;
++		std::cerr << "[routes] " << lastRestrictError << "\n";
++		return false;
++	}
++
++	nlohmann::json j;
++	try
++	{
++		in >> j;
++	}
++	catch (const std::exception &e)
++	{
++		lastRestrictError = std::string("routes json parse error: ") + e.what();
++		std::cerr << "[routes] " << lastRestrictError << "\n";
++		return false;
++	}
++
++	nlohmann::json::iterator fi = j.find("flex");
++	if (fi != j.end() && fi->is_array())
++	{
++		for (nlohmann::json::iterator f = fi->begin(); f != fi->end(); ++f)
++		{
++			if (!f->is_array() || f->size() != 2)
++			{
++				std::cerr << "[routes] skipping malformed flex entry (need [from,to])\n";
++				continue;
++			}
++			flexEdges.insert(std::make_pair((*f)[0].get<int>(), (*f)[1].get<int>()));
++		}
++		std::cout << "[routes] " << flexEdges.size()
++				  << " edge(s) are flexible, A* may reroute them\n";
++	}
++
++	nlohmann::json::iterator it = j.find("routes");
++	if (it == j.end() || !it->is_array())
++	{
++		std::cout << "[routes] routes file has no 'routes' array, nothing to inject\n";
++		return true;
++	}
++
++	for (nlohmann::json::iterator r = it->begin(); r != it->end(); ++r)
++	{
++		RouteHint h;
++		h.from = r->value("from", -1);
++		h.to = r->value("to", -1);
++		nlohmann::json::iterator pi = r->find("path");
++		if (h.from < 0 || h.to < 0 || pi == r->end() || !pi->is_array())
++		{
++			std::cerr << "[routes] skipping malformed route (need from/to >= 0 and a path array)\n";
++			continue;
++		}
++		for (nlohmann::json::iterator c = pi->begin(); c != pi->end(); ++c)
++		{
++			if (!c->is_array() || c->size() != 2)
++			{
++				std::cerr << "[routes] skipping malformed path element (need [x,y])\n";
++				h.coords.clear();
++				break;
++			}
++			h.coords.push_back(std::make_pair((*c)[0].get<int>(), (*c)[1].get<int>()));
++		}
++		if (h.coords.size() < 1)
++		{
++			std::cerr << "[routes] route " << h.from << "->" << h.to << " has an empty path, skipped\n";
++			continue;
++		}
++		routeHints[std::make_pair(h.from, h.to)] = h;
++	}
++
++	std::cout << "[routes] loaded " << routeHints.size() << " route(s) from " << routesFileName << "\n";
++	return true;
++}
++
++// ---------------------------------------------------------------- pins mode
 +
 +bool LLMMapper::restrictDestinations(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes)
 +{
@@ -416,6 +714,37 @@ index 0000000..b8e4d7c
 +	return true;
 +}
 +
++// ---------------------------------------------------------------- report
++
++MapConflict &LLMMapper::addConflict(const std::string &type, int x, int y, int cycle, int from, int to,
++									 const std::string &port, const std::string &msg)
++{
++	MapConflict c;
++	c.type = type;
++	c.x = x;
++	c.y = y;
++	c.cycle = cycle;
++	c.from = from;
++	c.to = to;
++	c.port = port;
++	c.msg = msg;
++	conflicts.push_back(c);
++	return conflicts.back();
++}
++
++void LLMMapper::noteSuggest(MapConflict &cf, int from, int to, bool flexible)
++{
++	cf.edgeList.push_back(std::make_pair(from, to));
++	cf.suggest = std::make_pair(from, to);
++	// a fixed edge becomes routable once the caller lists it in "flex";
++	// an already flexible one only needs another round
++	cf.suggestAction = flexible ? "reroute" : "flex";
++	if (std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++	{
++		suggestEdges.push_back(cf.suggest);
++	}
++}
++
 +void LLMMapper::writeReport(bool ok, CGRA *cgra)
 +{
 +	if (reportFileName.empty())
@@ -427,16 +756,26 @@ index 0000000..b8e4d7c
 +	r["ok"] = ok;
 +	r["mapping_method"] = "llm";
 +	r["pins_mode"] = (pinsMode == PINS_STRICT) ? "strict" : ((pinsMode == PINS_PREFER) ? "prefer" : "off");
++	if (verifyMode)
++	{
++		r["mode"] = "verify";
++	}
 +	r["ii"] = cgra ? cgra->get_t_max() : -1;
-+	r["stage"] = ok ? "done" : ((pinsRejected > 0) ? "placement" : "route");
++	r["stage"] = ok ? "done" : "verify";
 +	r["pins_total"] = (int)pins.size();
 +	r["pins_applied"] = pinsApplied;
 +	r["pins_rejected"] = pinsRejected;
++	r["routes_total"] = (int)routeHints.size();
++	r["routes_applied"] = routesApplied;
++	r["routes_rejected"] = routesRejected;
++	r["flex_total"] = (int)flexEdges.size();
++	r["flex_rerouted"] = flexRerouted;
 +	if (!lastRestrictError.empty())
 +	{
 +		r["error"] = lastRestrictError;
 +	}
 +
++	int maxLat = 0;
 +	nlohmann::json placement = nlohmann::json::array();
 +	if (ok)
 +	{
@@ -456,9 +795,54 @@ index 0000000..b8e4d7c
 +			e["t"] = pe->T;
 +			e["lat"] = n->rootDP->getLat();
 +			placement.push_back(e);
++			int out = n->rootDP->getLat() + n->rootDP->getFU()->supportedOPs[n->op];
++			if (out > maxLat) maxLat = out;
 +		}
 +	}
 +	r["placement"] = placement;
++	r["lat"] = maxLat;
++
++	nlohmann::json cf = nlohmann::json::array();
++	for (size_t i = 0; i < conflicts.size(); ++i)
++	{
++		const MapConflict &c = conflicts[i];
++		nlohmann::json e;
++		e["type"] = c.type;
++		e["pe"] = nlohmann::json::array({c.x, c.y});
++		e["cycle"] = c.cycle;
++		e["port"] = c.port;
++		if (!c.edgeList.empty())
++		{
++			e["edges"] = nlohmann::json::array();
++			for (size_t k = 0; k < c.edgeList.size(); ++k)
++			{
++				e["edges"].push_back(nlohmann::json::array({c.edgeList[k].first, c.edgeList[k].second}));
++			}
++		}
++		else if (c.from >= 0 && c.to >= 0)
++		{
++			e["edges"] = nlohmann::json::array({nlohmann::json::array({c.from, c.to})});
++		}
++		if (c.suggest.first >= 0 && !c.suggestAction.empty())
++		{
++			nlohmann::json s;
++			s["edge"] = nlohmann::json::array({c.suggest.first, c.suggest.second});
++			s["action"] = c.suggestAction;
++			e["suggest"] = s;
++		}
++		e["msg"] = c.msg;
++		cf.push_back(e);
++	}
++	r["conflicts"] = cf;
++
++	// one round of the repair loop: the caller promotes these edges to "flex"
++	// and reruns; nothing else in the route set has to change
++	nlohmann::json se = nlohmann::json::array();
++	for (size_t i = 0; i < suggestEdges.size(); ++i)
++	{
++		se.push_back(nlohmann::json::array({suggestEdges[i].first, suggestEdges[i].second}));
++	}
++	r["suggest_edges"] = se;
 +
 +	std::ofstream out(reportFileName.c_str());
 +	if (!out.is_open())
@@ -480,6 +864,883 @@ index 0000000..b8e4d7c
 +	}
 +
 +	bool ok = PathFinderMapper::Map(cgra, dfg);
++	writeReport(ok, cgra);
++	return ok;
++}
++
++// ---------------------------------------------------------------- verify mode
++
++bool LLMMapper::locateDP(int x, int y, int t, DFGNode *node, DataPath **out)
++{
++	unordered_set<PE *> allPEs = cgra->getAllPEList();
++	int found = 0;
++	DataPath *firstMatch = NULL;
++	for (unordered_set<PE *>::iterator it = allPEs.begin(); it != allPEs.end(); ++it)
++	{
++		PE *pe = *it;
++		if (pe->X != x || pe->Y != y || pe->T != t)
++		{
++			continue;
++		}
++		for (size_t i = 0; i < pe->subModules.size(); ++i)
++		{
++			FU *fu = dynamic_cast<FU *>(pe->subModules[i]);
++			if (!fu)
++			{
++				continue;
++			}
++			bool isNOP = (fu->currOP.compare("NOP") == 0);
++			if (!isNOP && fu->currOP.compare(node->op) != 0)
++			{
++				continue; // FU already bound to another op: never valid for this node
++			}
++			if (fu->supportedOPs.find(node->op) == fu->supportedOPs.end())
++			{
++				continue;
++			}
++			for (size_t k = 0; k < fu->subModules.size(); ++k)
++			{
++				DataPath *dp = dynamic_cast<DataPath *>(fu->subModules[k]);
++				if (!dp || dp->getMappedNode() != NULL)
++				{
++					continue;
++				}
++				++found;
++				if (firstMatch == NULL)
++				{
++					firstMatch = dp;
++				}
++			}
++		}
++	}
++	if (found == 0)
++	{
++		return false;
++	}
++	*out = firstMatch;
++	return true;
++}
++
++bool LLMMapper::dfsExplicit(int hopIdx, int hops, Port *cur, int lat, int endLat,
++							const RouteHint &h, Port *endPort, std::vector<LatPort> &path,
++							std::set<std::pair<Port *, int>> &seen, int depth,
++							DFGNode *owner, int regHops)
++{
++	if (hopIdx == hops && cur == endPort && lat == endLat)
++	{
++		return true;
++	}
++	if (depth > 8 * hops + 16)
++	{
++		return false;
++	}
++
++	std::vector<LatPort> nexts = cur->getMod()->getNextPorts(std::make_pair(lat, cur), this);
++	static const bool dbg = getenv("LLM_DEBUG_ROUTE") != NULL;
++	if (dbg)
++	{
++		std::cerr << std::string(depth, ' ') << "hop " << hopIdx << "/" << hops << " at ("
++				  << cur->getMod()->getPE()->X << "," << cur->getMod()->getPE()->Y << ") lat " << lat
++				  << " port " << cur->getFullName() << " -> " << nexts.size() << " candidate(s)\n";
++	}
++	for (size_t i = 0; i < nexts.size(); ++i)
++	{
++		LatPort np = nexts[i];
++		if (np.first > endLat)
++		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": past the consumer\n";
++			}
++			continue;
++		}
++
++		PE *pe = np.second->getMod()->getPE();
++		if (!pe)
++		{
++			continue;
++		}
++		int ni = -1;
++		if (hopIdx < hops && pe->X == h.coords[hopIdx + 1].first && pe->Y == h.coords[hopIdx + 1].second)
++		{
++			ni = hopIdx + 1; // advanced along the external route
++		}
++		else if (pe->X == h.coords[hopIdx].first && pe->Y == h.coords[hopIdx].second)
++		{
++			ni = hopIdx; // still inside the current PE (crossbar -> output register)
++		}
++		if (ni < 0)
++		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " at ("
++						  << pe->X << "," << pe->Y << ") lat " << np.first << ": not on the requested path\n";
++			}
++			continue;
++		}
++		if (seen.find(std::make_pair(np.second, np.first)) != seen.end())
++		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": already used\n";
++			}
++			continue;
++		}
++		// a port carries one signal per cycle: never step onto a port another
++		// node already drives in that very cycle
++		bool taken = false;
++		for (size_t m = 0; m < np.second->mapped_nodes.size(); ++m)
++		{
++			if (std::get<2>(np.second->mapped_nodes[m]) == np.first &&
++				std::get<0>(np.second->mapped_nodes[m]) != owner)
++			{
++				taken = true;
++				break;
++			}
++		}
++		if (taken)
++		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": driven by another node in this cycle\n";
++			}
++			continue;
++		}
++		PortType nt = np.second->getType();
++		int nreg = regHops + ((nt == REGI || nt == REGO) ? 1 : 0);
++		if (nreg > regHopCap())
++		{
++			if (dbg)
++			{
++				std::cerr << std::string(depth, ' ') << "  skip " << np.second->getFullName() << " lat "
++						  << np.first << ": register wait beyond the cap\n";
++			}
++			continue;
++		}
++		seen.insert(std::make_pair(np.second, np.first));
++		path.push_back(np);
++		if (dfsExplicit(ni, hops, np.second, np.first, endLat, h, endPort, path, seen, depth + 1, owner, nreg))
++		{
++			return true;
++		}
++		path.pop_back();
++		seen.erase(std::make_pair(np.second, np.first));
++	}
++	return false;
++}
++
++bool LLMMapper::buildExplicitPath(DFGNode *src, DFGNode *dst, const RouteHint &h,
++								  int startLat, int endLat, std::vector<LatPort> &path)
++{
++	path.clear();
++	int hops = (int)h.coords.size() - 1;
++	if (hops < 0)
++	{
++		return false;
++	}
++	if ((int)h.coords[0].first != src->rootDP->getPE()->X || (int)h.coords[0].second != src->rootDP->getPE()->Y)
++	{
++		addConflict("route", src->rootDP->getPE()->X, src->rootDP->getPE()->Y, startLat, src->idx, dst->idx, "",
++					"route path starts at (" + strint(h.coords[0].first) + "," + strint(h.coords[0].second) +
++						") but the source of node " + strint(src->idx) + " is pinned to (" +
++						strint(src->rootDP->getPE()->X) + "," + strint(src->rootDP->getPE()->Y) + ")");
++		return false;
++	}
++	int lastX = dst->rootDP->getPE()->X;
++	int lastY = dst->rootDP->getPE()->Y;
++	if ((int)h.coords[hops].first != lastX || (int)h.coords[hops].second != lastY)
++	{
++		addConflict("route", lastX, lastY, endLat, src->idx, dst->idx, "",
++					"route path ends at (" + strint(h.coords[hops].first) + "," + strint(h.coords[hops].second) +
++						") but the destination of node " + strint(dst->idx) + " is pinned to (" +
++						strint(lastX) + "," + strint(lastY) + ")");
++		return false;
++	}
++	for (int i = 0; i < hops; ++i)
++	{
++		int dx = std::abs(h.coords[i + 1].first - h.coords[i].first);
++		int dy = std::abs(h.coords[i + 1].second - h.coords[i].second);
++		if (dx + dy != 1)
++		{
++			addConflict("route", h.coords[i].first, h.coords[i].second, startLat + i, src->idx, dst->idx, "",
++						"route hop " + strint(i) + " is not a single PE step (" + strint(dx) + " + " +
++							strint(dy) + " != 1)");
++			return false;
++		}
++	}
++
++	// Timing: the value has to leave the source FU's output register at startLat
++	// and be consumed at endLat.  A hop does NOT cost a whole cycle on this
++	// network (HyCUBE forwards through a neighbour within the same cycle, see the
++	// 20->19 and 9->10 routes of the reference mapping), so the number of hops is
++	// not a timing bound: feasibility is decided by the port-graph search below.
++	// Only a genuinely impossible order of events is rejected here.
++	int avail = endLat - startLat;
++	if (avail < 0)
++	{
++		routesRejected++;
++		addConflict("timing", h.coords[0].first, h.coords[0].second, startLat, src->idx, dst->idx, "",
++					"node " + strint(dst->idx) + " consumes the value at cycle " + strint(endLat) +
++						" but it is not ready before cycle " + strint(startLat) + " (source node " +
++						strint(src->idx) + ", op " + src->op + ")");
++		return false;
++	}
++
++	DataPath *srcDP = src->rootDP;
++	FU *srcFU = srcDP->getFU();
++	std::map<std::string, int>::iterator opit = srcFU->supportedOPs.find(src->op);
++	if (opit == srcFU->supportedOPs.end())
++	{
++		addConflict("op", srcDP->getPE()->X, srcDP->getPE()->Y, startLat, src->idx, dst->idx, "",
++					"the pinned FU does not support op " + src->op);
++		return false;
++	}
++	Port *startPort = srcDP->getOutputPort(opit->second);
++	Port *endPort = lookupDestPort(src, dst);
++	if (startPort == NULL || endPort == NULL)
++	{
++		addConflict("route", lastX, lastY, endLat, src->idx, dst->idx, "",
++					"cannot resolve the port names for this edge");
++		return false;
++	}
++
++	if (getenv("LLM_DEBUG_ROUTE"))
++	{
++		std::cerr << "[dfs] edge " << src->idx << "->" << dst->idx << " from " << startPort->getFullName()
++				  << " lat " << startLat << " to " << endPort->getFullName() << " lat " << endLat
++				  << " hops " << hops << " opType " << src->getOPtype(dst) << "\n";
++	}
++	path.push_back(std::make_pair(startLat, startPort));
++	std::set<std::pair<Port *, int>> seen;
++	seen.insert(std::make_pair(startPort, startLat));
++	if (!dfsExplicit(0, hops, startPort, startLat, endLat, h, endPort, path, seen, 0, src, 0))
++	{
++		path.clear();
++		routesRejected++;
++		addConflict("route", h.coords[0].first, h.coords[0].second, startLat, src->idx, dst->idx, "",
++					"the given route cannot be realised on the port graph: no legal port path from (" +
++						strint(h.coords[0].first) + "," + strint(h.coords[0].second) + ") to (" +
++						strint(lastX) + "," + strint(lastY) + ") over " + strint(hops) +
++						" hop(s) (illegal turn, occupied port, or a wait in the register file of more than " +
++						strint(regHopCap()) + " cycle(s))");
++		return false;
++	}
++	return true;
++}
++
++void LLMMapper::checkPortOveruse()
++{
++	unordered_set<PE *> allPEs = cgra->getAllPEList();
++	for (unordered_set<PE *>::iterator it = allPEs.begin(); it != allPEs.end(); ++it)
++	{
++		std::stack<Module *> st;
++		st.push(*it);
++		while (!st.empty())
++		{
++			Module *m = st.top();
++			st.pop();
++			std::vector<Port *> all;
++			all.insert(all.end(), m->inputPorts.begin(), m->inputPorts.end());
++			all.insert(all.end(), m->outputPorts.begin(), m->outputPorts.end());
++			all.insert(all.end(), m->internalPorts.begin(), m->internalPorts.end());
++			for (size_t i = 0; i < all.size(); ++i)
++			{
++				Port *p = all[i];
++				if (p->mapped_nodes.size() < 2)
++				{
++					continue;
++				}
++				// register file ports deliberately hold several values over time
++				PortType t = p->getType();
++				if (t == REGI || t == REGO)
++				{
++					continue;
++				}
++				// per cycle: which source nodes drive the port, and through which
++				// edges (an edge is (source node, consumer node))
++				std::map<int, std::set<int>> perCycle;
++				std::map<int, std::set<std::pair<int, int>>> edgesPerCycle;
++				for (size_t k = 0; k < p->mapped_nodes.size(); ++k)
++				{
++					DFGNode *n = std::get<0>(p->mapped_nodes[k]);
++					// tuple is (source node, index of the consumer, cycle)
++					int cons = std::get<1>(p->mapped_nodes[k]);
++					int lat = std::get<2>(p->mapped_nodes[k]);
++					perCycle[lat].insert((int)n->idx);
++					if (cons >= 0)
++					{
++						edgesPerCycle[lat].insert(std::make_pair((int)n->idx, cons));
++					}
++				}
++				for (std::map<int, std::set<int>>::iterator c = perCycle.begin(); c != perCycle.end(); ++c)
++				{
++					if (c->second.size() <= 1)
++					{
++						continue;
++					}
++					std::string nodes;
++					for (std::set<int>::iterator e = c->second.begin(); e != c->second.end(); ++e)
++					{
++						nodes += " " + strint(*e);
++					}
++					PE *pe = p->getMod()->getPE();
++					MapConflict &cf = addConflict("port", pe ? pe->X : -1, pe ? pe->Y : -1, c->first,
++												  *c->second.begin(), -1, p->getFullName(),
++												  "port carries the values of nodes" + nodes + " in the same cycle");
++
++					// pick the edge to release: prefer one that is already
++					// flexible (rerunning fixes it), else the one with the most
++					// slack, which is the one that can afford a detour
++					const std::set<std::pair<int, int>> &es = edgesPerCycle[c->first];
++					int bestSlack = -1;
++					for (std::set<std::pair<int, int>>::const_iterator e = es.begin(); e != es.end(); ++e)
++					{
++						cf.edgeList.push_back(*e);
++						bool flex = isFlexEdge(e->first, e->second);
++						if (!flex && cf.suggestAction == "reroute")
++						{
++							continue;
++						}
++						std::map<std::pair<int, int>, int>::iterator si = edgeSlack.find(*e);
++						int slack = (si == edgeSlack.end()) ? 0 : si->second;
++						if (flex && cf.suggestAction != "reroute")
++						{
++							cf.suggest = *e;
++							cf.suggestAction = "reroute";
++							bestSlack = slack;
++						}
++						else if (cf.suggestAction != "reroute" && slack > bestSlack)
++						{
++							cf.suggest = *e;
++							cf.suggestAction = "flex";
++							bestSlack = slack;
++						}
++					}
++					if (cf.suggestAction.empty() && !es.empty())
++					{
++						cf.suggest = *es.begin();
++						cf.suggestAction = "no-flex";
++					}
++					if (cf.suggest.first >= 0 &&
++						std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++					{
++						suggestEdges.push_back(cf.suggest);
++					}
++				}
++			}
++			for (size_t i = 0; i < m->subModules.size(); ++i)
++			{
++				st.push(m->subModules[i]);
++			}
++		}
++	}
++}
++
++// SELECT must see exactly one valid operand in the cycle it executes
++// (CGRATile.cpp:175 asserts !(I1isvalid && I2isvalid)).  The port graph cannot
++// see this: both operands travel through different input ports, so the route
++// search happily delivers both in the same cycle.  Statically decidable from the
++// mapping: it is a conflict exactly when two operand edges of the same SELECT
++// node arrive in the same cycle.
++void LLMMapper::checkOperandExclusivity(DFG *dfg)
++{
++	for (size_t i = 0; i < dfg->nodeList.size(); ++i)
++	{
++		DFGNode *n = &dfg->nodeList[i];
++		if (n->rootDP == NULL || n->op != "SELECT")
++		{
++			continue;
++		}
++		std::map<int, std::vector<int>> byCycle; // arrival cycle -> parent nodes
++		const bool dbgSel = getenv("LLM_DEBUG_SEL") != NULL;
++		for (size_t k = 0; k < n->parents.size(); ++k)
++		{
++			DFGNode *p = n->parents[k];
++			if (p == NULL)
++			{
++				continue;
++			}
++			std::map<std::pair<int, int>, int>::iterator ai =
++				edgeArrival.find(std::make_pair((int)p->idx, (int)n->idx));
++			if (ai == edgeArrival.end())
++			{
++				continue;
++			}
++			byCycle[ai->second].push_back((int)p->idx);
++			if (dbgSel)
++			{
++				std::cout << "[sel] node " << n->idx << " <- " << p->idx << " arrives cycle "
++						  << ai->second << " (exec " << n->rootDP->getLat() << ")\n";
++			}
++		}
++		for (std::map<int, std::vector<int>>::iterator c = byCycle.begin(); c != byCycle.end(); ++c)
++		{
++			if (c->second.size() < 2)
++			{
++				continue;
++			}
++			std::string nodes;
++			for (size_t q = 0; q < c->second.size(); ++q)
++			{
++				nodes += " " + strint(c->second[q]);
++			}
++			PE *pe = n->rootDP->getPE();
++			MapConflict &cf = addConflict("op", pe ? pe->X : -1, pe ? pe->Y : -1, c->first,
++										  c->second[0], (int)n->idx, "",
++										  "SELECT node " + strint((int)n->idx) + " gets both operands in cycle " +
++											  strint(c->first) + " (from nodes" + nodes + ")");
++			// the operand that can still afford to arrive later is the one with slack
++			int bestSlack = -1;
++			for (size_t q = 0; q < c->second.size(); ++q)
++			{
++				std::pair<int, int> e = std::make_pair(c->second[q], (int)n->idx);
++				cf.edgeList.push_back(e);
++				std::map<std::pair<int, int>, int>::iterator si = edgeSlack.find(e);
++				int slack = (si == edgeSlack.end()) ? 0 : si->second;
++				bool flex = isFlexEdge(e.first, e.second);
++				if (flex)
++				{
++					cf.suggest = e;
++					cf.suggestAction = "reroute";
++					break;
++				}
++				if (slack > bestSlack)
++				{
++					cf.suggest = e;
++					cf.suggestAction = "flex";
++					bestSlack = slack;
++				}
++			}
++			if (cf.suggest.first >= 0 &&
++				std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++			{
++				suggestEdges.push_back(cf.suggest);
++			}
++		}
++	}
++}
++
++// An input register takes one value per cycle (CGRATile.cpp:352/358/364 assert
++// the register is empty before it is overwritten).  The operand registers are
++// REGI ports, which checkPortOveruse() deliberately skips because they legitimately
++// hold different values over time; per cycle they are still exclusive, so grouping
++// by source and cycle catches the double write.  Same source twice in a cycle is a
++// broadcast of one value, which is legal.
++void LLMMapper::checkInputExclusivity()
++{
++	unordered_set<PE *> allPEs = cgra->getAllPEList();
++	for (unordered_set<PE *>::iterator it = allPEs.begin(); it != allPEs.end(); ++it)
++	{
++		std::stack<Module *> st;
++		st.push(*it);
++		while (!st.empty())
++		{
++			Module *m = st.top();
++			st.pop();
++			for (size_t i = 0; i < m->inputPorts.size(); ++i)
++			{
++				Port *p = m->inputPorts[i];
++				if (p->getType() != REGI || p->mapped_nodes.size() < 2)
++				{
++					continue;
++				}
++				std::map<int, std::set<int>> perCycle;
++				for (size_t k = 0; k < p->mapped_nodes.size(); ++k)
++				{
++					DFGNode *n = std::get<0>(p->mapped_nodes[k]);
++					perCycle[std::get<2>(p->mapped_nodes[k])].insert((int)n->idx);
++				}
++				for (std::map<int, std::set<int>>::iterator c = perCycle.begin(); c != perCycle.end(); ++c)
++				{
++					if (c->second.size() < 2)
++					{
++						continue;
++					}
++					std::string nodes;
++					for (std::set<int>::iterator e = c->second.begin(); e != c->second.end(); ++e)
++					{
++						nodes += " " + strint(*e);
++					}
++					PE *pe = p->getMod()->getPE();
++					MapConflict &cf = addConflict("op", pe ? pe->X : -1, pe ? pe->Y : -1, c->first,
++												  *c->second.begin(), -1, p->getFullName(),
++												  "input register " + p->getFullName() +
++													  " would be written by two different values in cycle " +
++													  strint(c->first) + " (nodes" + nodes + ")");
++					int bestSlack = -1;
++					for (size_t q = 0; q < p->mapped_nodes.size(); ++q)
++					{
++						if (std::get<2>(p->mapped_nodes[q]) != c->first)
++						{
++							continue;
++						}
++						std::pair<int, int> e = std::make_pair((int)std::get<0>(p->mapped_nodes[q])->idx,
++															   std::get<1>(p->mapped_nodes[q]));
++						cf.edgeList.push_back(e);
++						std::map<std::pair<int, int>, int>::iterator si = edgeSlack.find(e);
++						int slack = (si == edgeSlack.end()) ? 0 : si->second;
++						if (isFlexEdge(e.first, e.second))
++						{
++							cf.suggest = e;
++							cf.suggestAction = "reroute";
++							break;
++						}
++						if (slack > bestSlack)
++						{
++							cf.suggest = e;
++							cf.suggestAction = "flex";
++							bestSlack = slack;
++						}
++					}
++					if (cf.suggest.first >= 0 &&
++						std::find(suggestEdges.begin(), suggestEdges.end(), cf.suggest) == suggestEdges.end())
++					{
++						suggestEdges.push_back(cf.suggest);
++					}
++				}
++			}
++			for (size_t i = 0; i < m->subModules.size(); ++i)
++			{
++				st.push(m->subModules[i]);
++			}
++		}
++	}
++}
++
++bool LLMMapper::VerifyMap(CGRA *cgra, DFG *dfg)
++{
++	this->cgra = cgra;
++	this->dfg = dfg;
++	conflicts.clear();
++	pinsApplied = 0;
++	pinsRejected = 0;
++	routesApplied = 0;
++	routesRejected = 0;
++
++	if (!loadPins())
++	{
++		writeReport(false, cgra);
++		return false;
++	}
++	if (!loadRoutes())
++	{
++		writeReport(false, cgra);
++		return false;
++	}
++	if (pins.empty())
++	{
++		lastRestrictError = "verify mode requires a non-empty 'pins' array";
++		writeReport(false, cgra);
++		return false;
++	}
++
++	// sortedNodeList is what writeReport() and printHyCUBEBinary() walk; the
++	// verify order itself is derived from the ASAP levels so that every parent
++	// is placed before its children.
++	sortBackEdgePriorityASAP();
++
++	std::vector<DFGNode *> order;
++	for (size_t i = 0; i < sortedNodeList.size(); ++i)
++	{
++		order.push_back(sortedNodeList[i]);
++	}
++	for (DFGNode &n : dfg->nodeList)
++	{
++		if (std::find(order.begin(), order.end(), &n) == order.end())
++		{
++			order.push_back(&n);
++		}
++	}
++	std::stable_sort(order.begin(), order.end(), [](DFGNode *a, DFGNode *b) {
++		if (a->ASAP != b->ASAP) return a->ASAP < b->ASAP;
++		return a->idx < b->idx;
++	});
++
++	bool ok = true;
++	int II = cgra->get_t_max();
++
++	// ---- pass 1: placement
++	for (size_t i = 0; i < order.size(); ++i)
++	{
++		DFGNode *node = order[i];
++		std::map<int, PlacementPin>::iterator pit = pins.find((int)node->idx);
++		if (pit == pins.end())
++		{
++			lastRestrictError = "node " + strint((int)node->idx) + " (op=" + node->op + ") has no pin";
++			addConflict("placement", -1, -1, -1, (int)node->idx, -1, "", lastRestrictError);
++			++pinsRejected;
++			ok = false;
++			continue;
++		}
++		PlacementPin &pin = pit->second;
++
++		int earliest = 0;
++		for (size_t k = 0; k < node->parents.size(); ++k)
++		{
++			DFGNode *p = node->parents[k];
++			if (p->rootDP == NULL)
++			{
++				continue; // back edge, validated in pass 2
++			}
++			int plat = p->rootDP->getLat();
++			int plop = p->rootDP->getFU()->supportedOPs[p->op];
++			// a routed value can be consumed in the same cycle its producer writes
++			// its output register (HyCUBE forwards within a cycle), so the hop count
++			// does not add to the earliest consumer cycle: whether a given path can
++			// make it in time is decided by the port graph search in pass 2.
++			if (plat + plop > earliest)
++			{
++				earliest = plat + plop;
++			}
++		}
++
++		int lat;
++		if (pin.lat >= 0)
++		{
++			lat = pin.lat;
++		}
++		else
++		{
++			int k = (earliest - pin.t + II - 1) / II;
++			if (k < 0) k = 0;
++			lat = pin.t + k * II;
++		}
++		if (lat % II != pin.t)
++		{
++			addConflict("placement", pin.x, pin.y, pin.t, (int)node->idx, -1, "",
++						"pin for node " + strint((int)node->idx) + " has lat=" + strint(lat) +
++							" which is not in phase t=" + strint(pin.t));
++			++pinsRejected;
++			ok = false;
++			continue;
++		}
++		if (lat < earliest)
++		{
++			addConflict("timing", pin.x, pin.y, lat, (int)node->idx, -1, "",
++						"node " + strint((int)node->idx) + " is pinned to cycle " + strint(lat) +
++							" but its parents need it no earlier than " + strint(earliest));
++			++pinsRejected;
++			ok = false;
++			continue;
++		}
++
++		DataPath *dp = NULL;
++		if (!locateDP(pin.x, pin.y, pin.t, node, &dp))
++		{
++			// distinguish "occupied" from "op not supported"
++			std::string why = "no free datapath";
++			unordered_set<PE *> allPEs = cgra->getAllPEList();
++			for (unordered_set<PE *>::iterator it = allPEs.begin(); it != allPEs.end(); ++it)
++			{
++				PE *pe = *it;
++				if (pe->X != pin.x || pe->Y != pin.y || pe->T != pin.t)
++				{
++					continue;
++				}
++				for (size_t s = 0; s < pe->subModules.size(); ++s)
++				{
++					FU *fu = dynamic_cast<FU *>(pe->subModules[s]);
++					if (!fu)
++					{
++						continue;
++					}
++					if (fu->supportedOPs.find(node->op) == fu->supportedOPs.end())
++					{
++						why = "PE (" + strint(pin.x) + "," + strint(pin.y) + ",t" + strint(pin.t) +
++							  ") has no FU that supports op " + node->op;
++					}
++					else
++					{
++						for (size_t d = 0; d < fu->subModules.size(); ++d)
++						{
++							DataPath *ddp = dynamic_cast<DataPath *>(fu->subModules[d]);
++							if (ddp && ddp->getMappedNode() != NULL)
++							{
++								why = "datapath of PE (" + strint(pin.x) + "," + strint(pin.y) + ",t" +
++									  strint(pin.t) + ") is already used by node " +
++									  strint((int)ddp->getMappedNode()->idx);
++							}
++						}
++					}
++				}
++			}
++			addConflict("placement", pin.x, pin.y, pin.t, (int)node->idx, -1, "",
++						"pin for node " + strint((int)node->idx) + " (op=" + node->op + "): " + why);
++			++pinsRejected;
++			ok = false;
++			continue;
++		}
++
++		dp->assignNode(node, lat, dfg);
++		node->rootDP = dp;
++		++pinsApplied;
++	}
++
++	// ---- pass 2: routes, explicit ones first
++	for (int phase = 0; phase < 2; ++phase)
++	for (size_t i = 0; i < order.size(); ++i)
++	{
++		DFGNode *dst = order[i];
++		if (dst->rootDP == NULL)
++		{
++			continue;
++		}
++		for (size_t k = 0; k < dst->parents.size(); ++k)
++		{
++			DFGNode *src = dst->parents[k];
++			if (src->rootDP == NULL)
++			{
++				continue;
++			}
++			DataPath *srcDP = src->rootDP;
++			FU *srcFU = srcDP->getFU();
++			if (srcFU->supportedOPs.find(src->op) == srcFU->supportedOPs.end())
++			{
++				continue;
++			}
++			int oplat = srcFU->supportedOPs[src->op];
++			int startLat = srcDP->getLat() + oplat;
++			int dstLat = dst->rootDP->getLat();
++			int endLat = dstLat < startLat ? dstLat + II : dstLat; // back edge -> next iteration
++
++			std::map<std::pair<int, int>, RouteHint>::iterator rit =
++				routeHints.find(std::make_pair((int)src->idx, (int)dst->idx));
++			// a flexible edge keeps its hint only as documentation: the A* owns it
++			const bool flexible = isFlexEdge((int)src->idx, (int)dst->idx);
++			const bool fixed = (rit != routeHints.end()) && !flexible;
++
++			// phase 0 assigns the fixed routes before the internal A* touches any
++			// port, so a hint is never rejected just because a fallback route
++			// happened to consume its crossbar first
++			if (phase == 0 && !fixed)
++			{
++				continue;
++			}
++			if (phase == 1 && fixed)
++			{
++				continue;
++			}
++			edgeSlack[std::make_pair((int)src->idx, (int)dst->idx)] = endLat - startLat;
++			if (flexible && rit != routeHints.end())
++			{
++				++flexRerouted;
++			}
++
++			if (fixed)
++			{
++				std::vector<LatPort> path;
++				size_t conflictsBefore = conflicts.size();
++				if (buildExplicitPath(src, dst, rit->second, startLat, endLat, path))
++				{
++					assignPath(src, dst, path);
++					dumpPath((int)src->idx, (int)dst->idx, path);
++					edgeArrival[std::make_pair((int)src->idx, (int)dst->idx)] =
++						path.empty() ? startLat : path.back().first;
++					++routesApplied;
++				}
++				else
++				{
++					// the caller gave a path the port graph cannot realise: hand the
++					// edge back so it can be released and rerouted on the next run.
++					// buildExplicitPath usually already reported why, so annotate
++					// that conflict instead of stacking a second one on top of it
++					MapConflict *cf = NULL;
++					for (size_t ci = conflictsBefore; ci < conflicts.size(); ++ci)
++					{
++						if (conflicts[ci].from == (int)src->idx && conflicts[ci].to == (int)dst->idx)
++						{
++							cf = &conflicts[ci];
++							break;
++						}
++					}
++					if (cf == NULL)
++					{
++						cf = &addConflict("route", dst->rootDP->getPE()->X, dst->rootDP->getPE()->Y,
++										  dstLat, src->idx, dst->idx, "",
++										  "the given route cannot be realised on the port graph");
++					}
++					noteSuggest(*cf, (int)src->idx, (int)dst->idx, flexible);
++					ok = false;
++				}
++				continue;
++			}
++
++			// no external route: fall back to the internal A* so that a partial
++			// route set still yields a complete mapping
++			Port *startPort = srcDP->getOutputPort(oplat);
++			Port *endPort = lookupDestPort(src, dst);
++			if (startPort == NULL || endPort == NULL)
++			{
++				addConflict("route", dst->rootDP->getPE()->X, dst->rootDP->getPE()->Y, dstLat, src->idx, dst->idx, "",
++							"cannot resolve the port names for this edge");
++				ok = false;
++				continue;
++			}
++			std::vector<LatPort> path;
++			int cost = 0;
++			std::map<Port *, std::set<DFGNode *>> mutexPaths;
++			LatPort start = std::make_pair(startLat, startPort);
++			LatPort end = std::make_pair(endLat, endPort);
++			if (LeastCostPathAstar(start, end, dst->rootDP, path, cost, src, mutexPaths, dst))
++			{
++				assignPath(src, dst, path);
++				dumpPath((int)src->idx, (int)dst->idx, path);
++				edgeArrival[std::make_pair((int)src->idx, (int)dst->idx)] =
++					path.empty() ? startLat : path.back().first;
++			}
++			else
++			{
++				addConflict("route", dst->rootDP->getPE()->X, dst->rootDP->getPE()->Y, dstLat, src->idx, dst->idx, "",
++							"no path found by the internal A* for this edge at II=" + strint(II));
++				ok = false;
++			}
++		}
++	}
++
++	if (getenv("LLM_DEBUG_TILE") != NULL)
++	{
++		unordered_set<PE *> allPEs = cgra->getAllPEList();
++		for (unordered_set<PE *>::iterator pit = allPEs.begin(); pit != allPEs.end(); ++pit)
++		{
++			PE *pe = *pit;
++			if (pe->X != 1 || pe->Y != 1) continue;
++			std::stack<Module *> st;
++			st.push(pe);
++			while (!st.empty())
++			{
++				Module *m = st.top();
++				st.pop();
++				for (size_t i = 0; i < m->inputPorts.size(); ++i)
++				{
++					Port *p = m->inputPorts[i];
++					if (p->mapped_nodes.empty()) continue;
++					std::cout << "[tile] " << p->getFullName() << " type=" << (int)p->getType() << "\n";
++					for (size_t k = 0; k < p->mapped_nodes.size(); ++k)
++						std::cout << "[tile]    cyc " << std::get<2>(p->mapped_nodes[k])
++								  << " src " << std::get<0>(p->mapped_nodes[k])->idx
++								  << " cons " << std::get<1>(p->mapped_nodes[k]) << "\n";
++				}
++				for (size_t i = 0; i < m->subModules.size(); ++i) st.push(m->subModules[i]);
++			}
++		}
++	}
++	checkPortOveruse();
++	checkInputExclusivity();
++	checkOperandExclusivity(dfg);
++	if (!conflicts.empty())
++	{
++		ok = false;
++	}
++
++	if (!ok)
++	{
++		std::cerr << "[verify] " << conflicts.size() << " conflict(s), first: "
++				  << (conflicts.empty() ? std::string("none") : conflicts[0].msg) << "\n";
++	}
++
 +	writeReport(ok, cgra);
 +	return ok;
 +}

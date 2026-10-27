@@ -1,17 +1,17 @@
-"""Router 槽位工厂。
+"""布线槽位：PathFinderRouter 工厂 + 策略（RulePolicy / LLMPolicy）。
 
-pipeline 只依赖 ``interfaces.Router`` 协议（``route(job, dfg, arch, ii, pins,
-pins_mode) -> MapReport``）。当前实现：
-
-    PathFinderRouter  vendor mapper 的 pinned 模式（``-m 3``），所有臂共用。
-    B 臂的 routers/llm.py 合并时注册进 ``_ROUTERS``，pipeline 不改。
+pipeline 只依赖 ``interfaces.Router`` 协议；策略类只产出 Routes，不碰 mapper。
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .base import (Edge, Policy, dfg_edges, edge_slack, select_edges,
+                   shortest_path)
+from .llm import LLMPolicy, NoEndpoint, mock_from_bank
 from .pathfinder import PathFinderRouter
+from .rule import RulePolicy, load_bank, paths_of
 
 _ROUTERS = {"pathfinder": "vendor PathFinder (pinned, -m 3)"}
 DEFAULT_ROUTER = "pathfinder"
@@ -25,4 +25,7 @@ def make_router(kind: str = DEFAULT_ROUTER, *, repo_root: str, xdim: int, ydim: 
     return PathFinderRouter(repo_root=repo_root, xdim=xdim, ydim=ydim, timeout=timeout)
 
 
-__all__ = ["PathFinderRouter", "make_router", "DEFAULT_ROUTER"]
+__all__ = ["PathFinderRouter", "make_router", "DEFAULT_ROUTER", "Policy",
+           "RulePolicy", "LLMPolicy", "NoEndpoint", "Edge", "dfg_edges",
+           "edge_slack", "select_edges", "shortest_path", "load_bank",
+           "paths_of", "mock_from_bank"]

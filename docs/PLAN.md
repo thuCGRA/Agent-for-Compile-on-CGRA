@@ -80,6 +80,8 @@ DFG → facts → Placer → Placement → Router → MapReport + bin → Sim �
 
 **Spike（2 天，go/no-go）**：只做「一条边、一个 II」的注入与校验，跑通即继续；跑不通就止损，臂 B 降级为「SA 布局 + LLM 选 II 与 pins 策略」，并在论文里如实写成负结果。
 
+> **Spike 结果（go）**：见 [ARM_B_SPIKE.md](ARM_B_SPIKE.md)。verify 模式已落地并纳入 	oolchain/patches/0002-mapper.patch；rray_add II=4 上注入路线可改变二进制且仿真 Mismatches::0，四类非法输入各自给出具体冲突。附带修更：一拍的相位差不是跳数下界（组合转发），§4(a) 里那条「相位差 ≥ 曼哈顿距离」硬约束不成立。
+
 **(d) `LLMRouter`**
 - 输入：每条边的起止 `(x,y,t)`、slack、当前拥塞热图、方向表。
 - 输出：跳序列；按冲突簇批量提问，减少调用数。
