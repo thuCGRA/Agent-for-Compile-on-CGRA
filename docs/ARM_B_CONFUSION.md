@@ -222,3 +222,56 @@
 - LLM 行的 `over_permissive` 目前是**未观测到**，不是"不存在"。要观测它需要一份
   verify 通过、仿真崩溃的解；已知能构造这种情况的是 `20→19` 那条跨周期 SELECT 残留。
 - 静态过严的方向在 LLM 行同样成立（trmm 的 `static_disagreement` 2 格，确定性、仿真 0 mismatch）。
+
+## 三裁判（mapper / verify / sim）：静态漏报 0 格，误杀 19–27 格
+
+两个裁判（verify × sim）不够用：`mapper ok`（落出了 bitstream）本身就常被当成"成功"，
+而它只是第一个裁判。按三裁判重新分格：
+
+| 类别 | 50格·mode1 | 50格·mode2 | 50格·mode3 | LLM·mode1 | LLM·mode2 | LLM·mode3 |
+|---|---|---|---|---|---|---|
+| mapper_ok / verify_ok / sim_pass | **5** | **5** | **5** | 2 | 2 | 2 |
+| mapper_ok / verify_ok / sim_fail（静态漏报） | **0** | **0** | **0** | 0 | 0 | 0 |
+| mapper_ok / verify_reject / sim_pass（静态误杀） | 19 | 19 | 27 | 0 | 0 | 2 |
+| mapper_ok / verify_reject / sim_fail（两裁判一致否决） | 12 | 12 | 17 | 6 | 6 | 10 |
+| mapper_reject（无 bitstream） | 14 | 14 | 1 | 6 | 6 | 0 |
+
+覆盖 192 个格子（50×3 + 14×3）。三个结论：
+
+1. **静态漏报一栏是空的**：凡是 verify 判过、且 mapper 落了 bitstream 的格子，仿真全部通过。
+   在这批算例上 verify 是单向可靠的——它不放过错解，只冤枉对解。
+2. **"mapper ok" 确实不是成功判据**：mode3 里 44/50 格 mapper 都落出了 bitstream，但只有 5 格
+   三方一致通过；把 `mapper ok` 当成结论会得到 88% 的假成功率。
+3. 误杀占可比格子的 19–27/50（LLM 行 2/14），这正是"静态模型既不完备也不可靠"的量化，
+   且方向单一：宁可杀错，不肯放过。
+
+### `over_permissive`：撤回
+
+早前报告过一例"verify 过、仿真崩"（`20→19` 注入后 `CGRATile.cpp:175 Assertion !(I1isvalid && I2isvalid)`）。
+`tools/overperm.py` 在 `--pins_mode` 1/2/3 下重放 `r19` 与 `r19+sel`，四个组合全部
+`mapper_bin=True, verify_ok=True, conflicts=0, sim=pass`。**该例在当前构建上不可复现**，
+最可能的原因是早期 `sel_regress` 调用漏了 `--pins_mode`（pins 被静默忽略，仿真的是另一份解）。
+同时那批早期脚本还有一处缺陷：work 目录里没有拷 trace 文件，仿真会以
+`CGRA.cpp:214 Assertion 'dmemfile.is_open()'` 中止——和"缺二进制"是同一类假失败。
+因此 `over_permissive` 目前**未观测到**，历史那例撤回；所有历史 "sim abort" 结论都应按
+work 目录内容重查一遍再引用。
+
+### 反馈到底有没有进 prompt
+
+`work/eval-llm/` 里 `llm.csv` 记录 `llm_calls`：array_add/trmm 为 1，其余 8 个为 2（无缓存命中）。
+`call2.json` 的最后一条 user message 里确实有结构化反馈，例如：
+
+```
+## Feedback on the previous attempt
+no candidate DP matches pin (x=2,y=0,t=2) for node 16 (op=CMERGE);
+estimateRouting offered 10 candidate(s) over x[1..3] y[0..3]: (2,0,t3) (3,0,t3) ...
+```
+
+call1 → call2 改动的节点数：array_cond 17、gemm 22、conv3 23、conv2d 37、gemm_pace 49、
+hpcg 12、mac 20、mults1 20。被点名的节点落进候选集的有 5/7（conv3 未落进，gemm_pace 无候选集）。
+所以模型对反馈是敏感的，反馈也确实进了 prompt。
+
+真正的问题在 eval 脚本：`repair/pins.json` == call2 的输出，而 `strict/pins.json` **也** == call2 的输出
+（6/7 个 kernel 上 strict ≠ call1）。也就是说 "strict" 目录被后反馈的放置覆盖了，
+`strict/` 与 `repair/` 字节相同是**记账错误**，不是模型无视反馈的证据——关于"模型不听反馈"的
+假设应当撤回，换成"eval 脚本没有把 strict 变体固定成第一次调用的输出"。

@@ -1,0 +1,18 @@
+[
+ {
+  "case": "r19",
+  "mapper_bin": true,
+  "verify_ok": true,
+  "verify_conflicts": 0,
+  "sim": "pass",
+  "evidence": ""
+ },
+ {
+  "case": "r19+sel",
+  "mapper_bin": true,
+  "verify_ok": true,
+  "verify_conflicts": 0,
+  "sim": "pass",
+  "evidence": ""
+ }
+]
