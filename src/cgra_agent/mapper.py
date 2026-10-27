@@ -72,7 +72,7 @@ class Mapper:
         cmd = [self.mapper, "-d", dfg, "-x", str(self.x), "-y", str(self.y),
                "-j", mem, "-i", str(self.ii), "-t", self.arch,
                "-m", str(self.method),
-               "--pins", ppath, "--routes", rpath, "--report", rep, "--verify"]
+               "--pins", ppath, "--routes", rpath, "--report", rep, "--pins_mode", "2", "--verify"]
         p = subprocess.run(cmd, cwd=os.path.abspath(fixture_dir),
                            capture_output=True, text=True, timeout=timeout)
         log = p.stdout + p.stderr

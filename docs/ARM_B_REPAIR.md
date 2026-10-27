@@ -197,3 +197,19 @@ TREG_RO/TREG_RI 链）。`-m 0` 产出这种解没问题，但 verify 模式下�
 | 7 | SELECT 跨周期残留 | 两个操作数不同周期到达、但运行时 SELECT 在两者都仍有效的周期执行 → 仿真 abort，静态判不了 | 需要运行时谓词求值 | 仅在 ARM_B_REPAIR.md §7.1 记录为“不可静态检查” |
 
 第 5、6 条属于**接口/口径**错位而非硬件建模错位，但它们同样会伪造结论，所以一并列出。
+
+## 11. `--pins` 的静默失效与硬错误
+
+`--pins` 在没有 `--pins_mode` 时被**完全忽略**（`pins_applied=0`），而报告仍然 `ok=true`。
+第一版 50 格混淆矩阵就是被这个坑整体污染的：不带 `--verify` 的那一路实际跑的是纯 A*。
+
+现在 `Arguments` 解析阶段直接退出：
+
+```
+error: --pins was given but --pins_mode is 0 (off), so the pins file would be ignored
+       silently. Pass --pins_mode 1 (strict) or 2 (prefer).
+```
+
+`exit(2)`，并且 `--pins_mode` 超出 0/1/2 也报错。回归测试在 `tests/test_mapper_cli.py`
+（pytest 或 `python3 tests/test_mapper_cli.py` 均可跑，WSL 的 cgra-tc 环境没装 pytest）：
+3 项全绿。静默忽略是最坏的一种失败——它产出的数据看起来完全正常。

@@ -88,3 +88,42 @@
 数据：`work/armB/confusion/confusion.csv`（50 行，含 `verify_conflicts`、`reject_kind`、`first_msg`），
 每格目录下另有 `noverify.log` / `verify.log` / `sim.log` / `*_report.json`。
 脚本：`tools/confusion.py`（跑），`cac_scripts/armB/post.py`（归类）。
+
+## 确定性：27 格先被拆成 7 + 1 + 19
+
+“verify 拒、仿真过”只有在两次运行判的是**同一份解**时才有意义。`tools/determinism.py`
+对每个相关单元格用完全相同的 pins+routes 连跑两次，比较 `placement`、`routeInfo`、bitstream sha256：
+
+- `pins` / `k25` / `k50` / `k100` 四种配置：24 格**全部逐字段相同**（确定性成立）；
+- `rule` 配置：8 格**全部不同**（廉价放置把 mapper 推进了带随机性的搜索路径）。
+
+于是 27 格 `static_disagreement` 重新分成：
+
+| 结论 | 格数 | 判据 |
+|---|---|---|
+| `request_infeasible` | 19 | 首条冲突是 `hint_route_unrealisable` / `pin_infeasible_op`：拒的是**请求**，不是解 |
+| **`false_kill`** | **7** | 确定性成立 + 首条冲突是 `port_shared`(5) / `operand_select`(2)：同一份仿真 0-mismatch 的解被静态判死 |
+| `undecidable` | 1 | `port_name_unknown`：verify 拿不到端口名，它没有判，只是没话说 |
+| `ambiguous` | 0 | 确定性不成立且无法归入上面几类 |
+
+合计 27，与 `consistent_pass` 5 格相加正好是矩阵里的 32 格可比单元。
+
+`false_kill` 的 7 格：`array_cond` pins/k25（SELECT 同周期）、`conv2d` pins/k25/k50、`conv3` k25/k50（端口同周期两来源）。
+这 7 格是可以直接写进结论的：**静态检查在这 7 个实例上把一份硬件接受、仿真零 mismatch 的解判为非法**。
+
+`rule` 行的不确定性本身也是结论：廉价放置的输入相同、输出不同，说明它在 mapper 内部触发了非确定性搜索；
+后续凡是以 `rule` 行为依据的数字都需要多跑几次取中位数（与固定 II 表的口径一致）。
+
+## kernel 级归因：hpcg / mults1 不是布线问题
+
+`-m 0`（工具链自带 A*，无 pins、无 routes，II 自由）+ 同一批 trace：
+
+| kernel | 基线 II | 基线 mismatch | 结论 |
+|---|---|---|---|
+| array_add（对照） | 4 | 0 | 工具链自身在这套 trace 上是对的 |
+| hpcg | 4 | 1 | **kernel/trace 级**：工具链自己的解就 mismatch |
+| mults1 | 4 | 8 | **kernel/trace 级**：同上 |
+| gemm_pace | 9 | 0 | 不是 kernel 级：它在矩阵里的 mm=2 来自 II=4 下的受限映射 |
+
+所以 `hpcg`、`mults1` 在总表里标 `unverified(kernel-level)`，不参与布线结论；
+`gemm_pace` 仍需按布线问题处理（它在 II=9 才干净，说明 II=4 对它本身就很紧）。

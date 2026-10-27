@@ -186,7 +186,7 @@ def map_verify(inst, wd, rep, pins, routes_doc, tag):
         os.remove(rep_p)
     cmd = [MAPPER, "-m", "3", "-d", dfg, "-x", str(XD), "-y", str(YD),
            "-j", mem, "-i", str(II), "-t", "HyCUBE_4REG",
-           "--pins", pp, "--routes", rp, "--report", rep_p, "--verify"]
+           "--pins", pp, "--routes", rp, "--report", rep_p, "--pins_mode", "2", "--verify"]
     wall, rc, log, to = run(cmd, wd, "%s_r%d.log" % (tag, rep))
     doc = {}
     if os.path.exists(rep_p):
