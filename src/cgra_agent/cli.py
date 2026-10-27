@@ -74,7 +74,10 @@ def cmd_run(args) -> int:
         trace=args.trace,
         pins_file=args.pins_file,
         placer=args.placer,
+        router=args.router,
         pins_mode=args.pins_mode,
+        pin_ratio=args.pin_ratio,
+        pin_rule=args.pin_rule,
         base_url=args.base_url,
         api_key=args.api_key,
         model=args.model,
@@ -166,11 +169,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="llm = arm A; greedy/fixed are evaluation references, not the arm itself",
     )
     r.add_argument(
+        "--router",
+        default="pathfinder",
+        help="router slot (arm A: pathfinder = vendor pinned mapper; B arm registers its own)",
+    )
+    r.add_argument(
         "--pins-mode",
         type=int,
         default=None,
         choices=[1, 2, 3],
         help="force mapper pins mode (default: 1 when every node is pinned, else 3)",
+    )
+    r.add_argument(
+        "--pin-ratio",
+        type=float,
+        default=1.0,
+        help="pin density ablation: fraction of nodes to pin (0..1; <1 switches to repair mode)",
+    )
+    r.add_argument(
+        "--pin-rule",
+        default="degree",
+        choices=["degree", "critical", "bank"],
+        help="pin density ablation: which nodes to pin",
     )
     r.add_argument("--base-url", default=None)
     r.add_argument("--api-key", default=None)

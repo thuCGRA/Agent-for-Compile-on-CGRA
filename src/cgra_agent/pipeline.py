@@ -24,10 +24,10 @@ import yaml
 
 from .interfaces import CDD, Placement
 from .llm.client import LLMClient, LLMError
-from .placers.fixed import FixedPlacer
-from .placers.greedy import GreedyError, GreedyPlacer
-from .placers.llm import LLMPlacer, PlacementSchemaError
-from .routers.pathfinder import PathFinderRouter
+from .placers import make_placer
+from .placers.greedy import GreedyError
+from .placers.llm import PlacementSchemaError
+from .routers import DEFAULT_ROUTER, make_router
 from .tools.dfg import build_dfg
 from .tools.facts import build_facts, facts_for_ii
 from .tools.jobdir import Deadline, JobDir, ToolError, tail
@@ -154,7 +154,10 @@ class Pipeline:
         trace: Optional[str] = None,
         pins_file: Optional[str] = None,
         placer: str = "llm",
+        router: str = DEFAULT_ROUTER,
         pins_mode: Optional[int] = None,
+        pin_ratio: float = 1.0,
+        pin_rule: str = "degree",
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
@@ -174,7 +177,10 @@ class Pipeline:
         self.trace_arg = trace
         self.pins_file = pins_file
         self.placer_kind = (placer or "llm").lower()
+        self.router_kind = (router or DEFAULT_ROUTER).lower()
         self.pins_mode = pins_mode
+        self.pin_ratio = float(pin_ratio)
+        self.pin_rule = (pin_rule or "degree").lower()
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
@@ -210,8 +216,8 @@ class Pipeline:
         max_rounds = int(cfg.get("max_rounds") or 4)
         ladder = _ii_ladder(cfg, self.ii_override, max_ii)
         deadline = Deadline(walltime)
-        router = PathFinderRouter(
-            repo_root=self.repo_root, xdim=xdim, ydim=ydim, timeout=mapper_timeout
+        router = make_router(
+            self.router_kind, repo_root=self.repo_root, xdim=xdim, ydim=ydim, timeout=mapper_timeout
         )
 
         # S0 init -----------------------------------------------------------
@@ -235,25 +241,24 @@ class Pipeline:
 
         llm_log = job.file("llm_calls.jsonl")
         client = None
-        if self.placer_kind == "greedy":
-            placer = GreedyPlacer()
-        elif self.pins_file or self.placer_kind == "fixed":
-            if not self.pins_file:
-                raise ToolError("placer=fixed needs --pins-file")
-            placer = FixedPlacer.from_file(self.pins_file)
-        else:
+        if self.placer_kind == "llm":
             client = LLMClient(
                 base_url=self.base_url,
                 api_key=self.api_key,
                 model=self.model,
                 call_log_path=llm_log,
             )
-            placer = LLMPlacer(
-                client,
+        try:
+            placer = make_placer(
+                self.placer_kind,
+                client=client,
+                pins_file=self.pins_file,
+                seed=self.seed,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
-                seed=self.seed,
             )
+        except ValueError as exc:
+            raise ToolError(str(exc))
 
         run: Dict[str, Any] = {
             "arm": self.arm,
@@ -455,6 +460,18 @@ class Pipeline:
                 {"node": p.node, "x": p.x, "y": p.y, "t": p.t} for p in placement.pins
             ]
             complete = len({p["node"] for p in pins}) == facts["n_nodes"]
+            if self.pin_ratio < 1.0:
+                # 密度消融：只保留选点规则挑中的节点，其余交给 mapper 自己布。
+                from .placers.pin_select import RULES, select as select_pins
+
+                if self.pin_rule not in RULES:
+                    raise ToolError(
+                        "unknown pin rule %r (expected one of %s)"
+                        % (self.pin_rule, ", ".join(RULES))
+                    )
+                keep = set(select_pins(facts, self.pin_ratio, self.pin_rule))
+                pins = [p for p in pins if p["node"] in keep]
+                complete = False
             pins_mode = self.pins_mode if self.pins_mode is not None else (1 if complete else 3)
             record: Dict[str, Any] = {
                 "attempt": len(attempts) + 1,
@@ -462,6 +479,8 @@ class Pipeline:
                 "ii": ii,
                 "llm_call": llm_calls,
                 "n_pins": len(pins),
+                "pin_ratio": self.pin_ratio,
+                "pin_rule": self.pin_rule,
                 "pins_mode": pins_mode,
                 "reasoning": placement.note[:400],
             }
@@ -510,7 +529,17 @@ class Pipeline:
             run["stage"] = "S5"
             mapper_rounds += 1
             map_job = job.dir("map-%02d" % mapper_rounds)
-            pins_path = map_job.write_json("pins.json", _pins_payload(placement, ii, placement.source, pins_mode))
+            pins_path = map_job.write_json(
+                "pins.json",
+                {
+                    "pins": pins,
+                    "reasoning": (placement.note or "")[:800],
+                    "ii": ii,
+                    "source": placement.source,
+                    "pin_ratio": self.pin_ratio,
+                    "pin_rule": self.pin_rule,
+                },
+            )
             last_pins = job.read_json(pins_path)
             last_map_job = map_job
             try:
@@ -676,6 +705,8 @@ class Pipeline:
                     "stage": last_map.report.stage,
                     "pins_total": last_map.report.pins_total,
                     "pins_applied": last_map.report.pins_applied,
+                    "pin_attempts": last_map.report.pins_applied,
+                    "pin_attempts_note": "cumulative across mapper internal passes; not distinct nodes",
                     "pins_rejected": last_map.report.pins_rejected,
                     "error": last_map.report.error,
                     "placement": last_map.report.placement,
@@ -715,6 +746,15 @@ class Pipeline:
                 for rec in (client.records if client else [])
             ],
             "calls_log": os.path.basename(llm_log) if client else "",
+        }
+        run["pins"] = {
+            "ratio": self.pin_ratio,
+            "rule": self.pin_rule,
+            "applied": last_map.report.pins_applied if last_map else 0,
+            "total": last_map.report.pins_total if last_map else 0,
+            # mapper 的 pins_applied 是“内部各轮放置尝试累计成功次数”，不是去重节点数，
+            # 可能大于 pins_total；这里同时给出原始值和语义说明，避免误读。
+            "applied_semantics": "cumulative pin applications across mapper's internal passes",
         }
         run["timings"] = {
             "total_s": round(time.monotonic() - started, 2),
