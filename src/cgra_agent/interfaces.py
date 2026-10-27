@@ -77,10 +77,19 @@ class MapReport:
     elapsed_s: float = 0.0
     routes_total: int = 0
     routes_applied: int = 0
+    routes_rejected: int = 0
     flex_total: int = 0
     flex_rerouted: int = 0
+    # router 负责落 bitstream：pipeline 不再自己去目录里找 bin 文件
+    binary: str = ""
+    binary_sha256: str = ""
     # 调用方该释放的边，直接抄进 Routes.flex 重跑一轮
     suggest_edges: List[Tuple[int, int]] = field(default_factory=list)
+    # 失败分类：static（verify 拒）| runtime（仿真断言炸）| semantic（值错）
+    # 三类对应完全不同的反馈策略，见 docs/ARM_B_REPAIR.md 第 8 节
+    failure_class: str = ""
+    # 策略侧附加信息（覆盖率、接受/拒绝、耗时…），只有 policy 会填
+    extra: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict) -> "MapReport":
@@ -95,6 +104,7 @@ class SimResult:
     mismatches: int = 0
     cycles: int = 0
     evidence: str = ""     # 失败时的定位串，例如 "PE (1,2), cycle 7: ADD got both operands"
+    failure_class: str = ""   # runtime | semantic（"": 通过）
 
     @classmethod
     def from_dict(cls, d: dict) -> "SimResult":

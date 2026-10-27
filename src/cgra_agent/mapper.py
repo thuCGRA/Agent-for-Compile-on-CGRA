@@ -90,6 +90,7 @@ class Mapper:
         r.suggest_edges = [tuple(e) for e in data.get("suggest_edges", [])]
         r.routes_total = data.get("routes_total", 0)
         r.routes_applied = data.get("routes_applied", 0)
+        r.failure_class = "" if r.ok else "static"
 
         binary = None
         if r.ok:
@@ -112,12 +113,15 @@ class Mapper:
         out = p.stdout + p.stderr
         m = re.search(r"Matches::(\d+)\s*,?\s*Mismatches::(\d+)", out)
         if m:
-            return SimResult(ok=int(m.group(2)) == 0, matches=int(m.group(1)),
-                             mismatches=int(m.group(2)))
+            mm = int(m.group(2))
+            return SimResult(ok=mm == 0, matches=int(m.group(1)), mismatches=mm,
+                             failure_class="" if mm == 0 else "semantic")
         if "Assertion" in out or p.returncode != 0:
             line = next((ln for ln in out.splitlines() if "Assertion" in ln), "")
-            return SimResult(ok=False, evidence="simulator aborted: %s" % line[:200])
-        return SimResult(ok=False, evidence="simulator printed no verdict")
+            return SimResult(ok=False, evidence="simulator aborted: %s" % line[:200],
+                             failure_class="runtime")
+        return SimResult(ok=False, evidence="simulator printed no verdict",
+                         failure_class="runtime")
 
     # ------------------------------------------------------------ 修复循环
 
