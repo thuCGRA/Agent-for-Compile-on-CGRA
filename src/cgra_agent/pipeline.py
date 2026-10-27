@@ -17,12 +17,12 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 import yaml
 
-from .interfaces import CDD, Placement
+from .interfaces import CDD, MapReport, Pin, Placement
 from .llm.client import LLMClient, LLMError
 from .placers import make_placer
 from .placers.greedy import GreedyError
@@ -31,7 +31,6 @@ from .routers import DEFAULT_ROUTER, make_router
 from .tools.dfg import build_dfg
 from .tools.facts import build_facts, facts_for_ii
 from .tools.jobdir import Deadline, JobDir, ToolError, tail
-from .tools.mapper import MapperOutcome
 from .tools.sim import run_sim
 from .tools.trace import TraceNotFound, resolve_trace
 from .tools.validate import format_feedback, validate
@@ -101,8 +100,8 @@ def _pins_payload(placement: Placement, ii: int, source: str, mode: int) -> Dict
     }
 
 
-def _map_summary(out: MapperOutcome) -> Dict[str, Any]:
-    mp = out.report
+def _map_summary(out: MapReport) -> Dict[str, Any]:
+    mp = out
     return {
         "ok": mp.ok,
         "stage": mp.stage,
@@ -113,8 +112,8 @@ def _map_summary(out: MapperOutcome) -> Dict[str, Any]:
         "pins_rejected": mp.pins_rejected,
         "error": mp.error,
         "elapsed_s": mp.elapsed_s,
-        "binary": os.path.basename(out.binary) if out.binary else "",
-        "binary_sha256": out.binary_sha256,
+        "binary": os.path.basename(mp.binary) if mp.binary else "",
+        "binary_sha256": mp.binary_sha256,
         "placement": mp.placement,
     }
 
@@ -292,7 +291,7 @@ class Pipeline:
         error = ""
         cdd: Optional[CDD] = None
         last_pins: Optional[Dict[str, Any]] = None
-        last_map: Optional[MapperOutcome] = None
+        last_map: Optional[MapReport] = None
         last_map_job: Optional[JobDir] = None
         last_sim: Dict[str, Any] = {}
         last_sim_log = ""
@@ -529,43 +528,46 @@ class Pipeline:
             run["stage"] = "S5"
             mapper_rounds += 1
             map_job = job.dir("map-%02d" % mapper_rounds)
-            pins_path = map_job.write_json(
-                "pins.json",
-                {
-                    "pins": pins,
-                    "reasoning": (placement.note or "")[:800],
-                    "ii": ii,
-                    "source": placement.source,
-                    "pin_ratio": self.pin_ratio,
-                    "pin_rule": self.pin_rule,
-                },
+            route_placement = Placement(
+                pins=[Pin(node=p["node"], x=p["x"], y=p["y"], t=p["t"]) for p in pins],
+                ii=ii,
+                note=placement.note,
+                source=placement.source,
             )
-            last_pins = job.read_json(pins_path)
+            route_facts = dict(facts)
+            route_facts["paths"] = {
+                "dfg": dfg.dfg,
+                "arch_json": dfg.arch,
+                "mem_alloc": dfg.mem_alloc,
+                "workdir": map_job.path,
+            }
             last_map_job = map_job
+            last_pins = {
+                "pins": pins, "ii": ii, "source": placement.source, "pins_mode": pins_mode,
+                "pin_ratio": self.pin_ratio, "pin_rule": self.pin_rule,
+            }
             try:
-                router.timeout = deadline.clamp(mapper_timeout)
                 out = router.route(
-                    job=map_job,
-                    dfg=dfg.dfg,
-                    arch=dfg.arch,
-                    ii=ii,
-                    pins=pins_path,
-                    pins_mode=pins_mode,
+                    route_placement,
+                    route_facts,
+                    route_facts,
+                    ii,
+                    {"pins_mode": pins_mode, "timeout_s": deadline.clamp(mapper_timeout)},
                 )
             except ToolError as exc:
                 error = "S5 mapper: %s" % exc
                 break
             last_map = out
             record["map"] = _map_summary(out)
-            if not out.report.ok:
+            if not out.ok:
                 attempts.append(record)
-                bucket = "placement" if out.report.stage == "placement" else "route"
+                bucket = "placement" if out.stage == "placement" else "route"
                 buckets[bucket] += 1
                 self._say(
                     "S5",
                     "FAILED stage=%s pins %d/%d: %s"
-                    % (out.report.stage, out.report.pins_applied, out.report.pins_total,
-                       (out.report.error or "")[:160]),
+                    % (out.stage, out.pins_applied, out.pins_total,
+                       (out.error or "")[:160]),
                 )
                 if buckets[bucket] <= BUCKET_LIMITS[bucket]:
                     if bucket == "placement":
@@ -574,14 +576,14 @@ class Pipeline:
                             "Pins are applied one node at a time in scheduler order; a pin on a "
                             "(PE, phase) slot that an earlier node already took is dropped and "
                             "counts as rejected. Keep every (x,y,t) distinct and leave the "
-                            "memory PEs at x=0 for LOAD/STORE." % (out.report.error or "")[:500]
+                            "memory PEs at x=0 for LOAD/STORE." % (out.error or "")[:500]
                         )
                     else:
                         feedback = (
                             "The mapper accepted every pin but failed to route at II=%d: %s\n"
                             "Routing moves one hop per cycle: shorten long edges, keep parents "
                             "and children within 2 columns, and make the phase difference equal "
-                            "to the manhattan distance." % (ii, (out.report.error or "")[:500])
+                            "to the manhattan distance." % (ii, (out.error or "")[:500])
                         )
                     continue
                 if advance_ii():
@@ -593,14 +595,14 @@ class Pipeline:
                     self._say("S5", "II raised to %d after mapper failures" % ladder[ladder_pos])
                     continue
                 error = "mapper failed after %d re-placement(s)" % buckets[bucket]
-                cdd = CDD(layer="edge", root_cause=(out.report.error or "")[:300],
-                          action="reroute", evidence=[out.report.error or ""], confidence=0.7)
+                cdd = CDD(layer="edge", root_cause=(out.error or "")[:300],
+                          action="reroute", evidence=[out.error or ""], confidence=0.7)
                 break
             self._say(
                 "S5",
                 "map ok II=%d lat=%d pins %d/%d (%.1fs)"
-                % (out.report.ii, out.report.lat, out.report.pins_applied,
-                   out.report.pins_total, out.report.elapsed_s),
+                % (out.ii, out.lat, out.pins_applied,
+                   out.pins_total, out.elapsed_s),
             )
 
             # --- S6 sim ---------------------------------------------------
@@ -615,8 +617,8 @@ class Pipeline:
                 record["sim"] = sim_summary
                 attempts.append(record)
                 run["result"] = {
-                    "ii": out.report.ii,
-                    "lat": out.report.lat,
+                    "ii": out.ii,
+                    "lat": out.lat,
                     "binary_sha256": out.binary_sha256,
                     "sim": "skipped(no trace)",
                 }
@@ -647,8 +649,8 @@ class Pipeline:
             if sim_summary["ok"]:
                 status = "ok"
                 run["result"] = {
-                    "ii": out.report.ii,
-                    "lat": out.report.lat,
+                    "ii": out.ii,
+                    "lat": out.lat,
                     "matches": sim_summary["matches"],
                     "mismatches": sim_summary["mismatches"],
                     "cycles": sim_summary["cycles"],
@@ -694,24 +696,19 @@ class Pipeline:
         final_ii = int(run["ii"]["final"] or ii)
         if last_pins is not None:
             job.write_json("pins.json", last_pins)
-        if last_map is not None and last_map.report_json:
-            job.write_json("report.json", last_map.report_json)
-        elif last_map is not None:
-            job.write_json(
-                "report.json",
-                {
-                    "ok": last_map.report.ok,
-                    "ii": last_map.report.ii,
-                    "stage": last_map.report.stage,
-                    "pins_total": last_map.report.pins_total,
-                    "pins_applied": last_map.report.pins_applied,
-                    "pin_attempts": last_map.report.pins_applied,
-                    "pin_attempts_note": "cumulative across mapper internal passes; not distinct nodes",
-                    "pins_rejected": last_map.report.pins_rejected,
-                    "error": last_map.report.error,
-                    "placement": last_map.report.placement,
-                },
-            )
+        if last_map is not None:
+            raw = None
+            if last_map_job is not None:
+                raw = last_map_job.read_json(last_map_job.file("map_report.json"), default=None)
+            if isinstance(raw, dict) and raw:
+                raw.setdefault("pins_applied", last_map.pins_applied)
+                raw["pin_attempts"] = last_map.pins_applied
+                raw["pin_attempts_note"] = (
+                    "cumulative across mapper internal passes; not distinct nodes"
+                )
+                job.write_json("report.json", raw)
+            else:
+                job.write_json("report.json", asdict(last_map))
         if last_sim:
             body = last_sim_log or ""
             job.write_text(
@@ -750,8 +747,8 @@ class Pipeline:
         run["pins"] = {
             "ratio": self.pin_ratio,
             "rule": self.pin_rule,
-            "applied": last_map.report.pins_applied if last_map else 0,
-            "total": last_map.report.pins_total if last_map else 0,
+            "applied": last_map.pins_applied if last_map else 0,
+            "total": last_map.pins_total if last_map else 0,
             # mapper 的 pins_applied 是“内部各轮放置尝试累计成功次数”，不是去重节点数，
             # 可能大于 pins_total；这里同时给出原始值和语义说明，避免误读。
             "applied_semantics": "cumulative pin applications across mapper's internal passes",

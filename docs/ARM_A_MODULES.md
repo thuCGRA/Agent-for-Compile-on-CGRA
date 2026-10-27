@@ -38,10 +38,11 @@ CLI 对应 `--placer {llm,greedy,fixed}` 与 `--router pathfinder`。
    `place(facts, arch, ii, budget, *, feedback=None, previous=None) -> Placement`。
 2. 在 `placers/__init__.py` 的 `_PLACERS` 加 `"sa": ...`，并在 `make_placer` 里加构造分支
    （构造参数按需，`--placer sa` 即可选中）。
-3. 把 `routers/llm.py` 放到 `src/cgra_agent/routers/llm.py`，实现
-   `route(*, job, dfg, arch, ii, pins=None, pins_mode=0) -> MapReport`；
-   在 `routers/__init__.py` 的 `_ROUTERS` 注册，`make_router` 加分支，`--router llm` 选中。
-4. `interfaces.py` 不改；pipeline 不加新参数。
+3. 把 `routers/llm.py` 放到 `src/cgra_agent/routers/llm.py`，实现 canonical 签名
+   `route(placement: Placement, facts: dict, arch: dict, ii: int, budget: dict) -> MapReport`；
+   文件位置从 `facts["paths"]` 取（见 §4），在 `routers/__init__.py` 的 `_ROUTERS` 注册，
+   `make_router` 加分支，`--router llm` 选中。
+4. `interfaces.py` 的 router 签名已定稿（2026-10-27，父代理批准改一次），pipeline 不加新参数。
 5. 注意：`pipeline` 的 `pin_ratio/pin_rule` 是 A 臂实验开关（默认 1.0 = 全 pin）；
    B 臂默认不设即可。`validate` 的硬规则（依赖延迟下界）是共享的，R3/R6 只告警。
 
@@ -49,6 +50,12 @@ CLI 对应 `--placer {llm,greedy,fixed}` 与 `--router pathfinder`。
 
 - `Placer.place(facts: dict, arch: dict, ii: int, budget: dict) -> Placement`
 - `Router.route(placement: Placement, facts: dict, arch: dict, ii: int, budget: dict) -> MapReport`
-  —— 注意 `interfaces.py` 的 Protocol 是 5 位置参数；pipeline 里 `PathFinderRouter` 用的是
-  关键字版 `route(*, job, dfg, arch, ii, pins, pins_mode)`。合并时以 pipeline 的关键字版为准，
-  `interfaces.py` 保持不动（它只是类型契约，Python 不做运行时校验）。
+  —— 5 个位置参数，不用关键字别名。pipeline 把 job/dfg/arch/ii/pins/pins_mode 收进
+  `placement` + `facts` + `budget` 三件套：
+  - `placement.pins`：要钉的节点（空 = 交给路由器自由布局，走 `-m 0`）；
+  - `facts["paths"]`：`{"dfg": ..., "arch_json": ..., "mem_alloc": ..., "workdir": ...}`，
+    router 直接按路径读文件，不再猜位置；
+  - `budget`：`{"pins_mode": 1|2|3|0, "timeout_s": float}`；
+  - 返回的 `MapReport` 带 `binary` 与 `binary_sha256`（router 负责写 bitstream，
+    pipeline 只按字段取文件），`pins_applied` 是 mapper 内部多轮尝试的累计值
+    （`pin_attempts` 别名，非去重节点数）。

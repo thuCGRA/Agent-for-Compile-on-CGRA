@@ -71,6 +71,9 @@ class MapReport:
     conflicts: List[dict] = field(default_factory=list)  # {pe, cycle, port, edges}
     placement: List[dict] = field(default_factory=list)
     elapsed_s: float = 0.0
+    # 产物位置：router 负责写 bitstream，pipeline 只按这两个字段取文件/校验。
+    binary: str = ""
+    binary_sha256: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "MapReport":

@@ -2,7 +2,9 @@
 
 状态：**可运行**。`array_add` 端到端 II=4、Mismatches::0；坏 pin 被本地校验拦下并带错误重问；
 同 pins 两次运行哈希一致。10 个 kernel 的 map 级评测 + pin 密度消融（k=0/25%/50%/100% ×
-degree/critical/bank）已完成，`-m 0` 基线同表对照。
+degree/critical/bank）已完成，`-m 0` 基线同表对照。II=3 实验（§2.4）给出明确负结果：
+**II 由 mapper 的 RecMin 决定，pin 无法把 II 拉到 3**。Router 契约已定稿为
+`route(placement, facts, arch, ii, budget) -> MapReport`（见 §3）。
 
 ## 1. 怎么跑
 
@@ -34,6 +36,9 @@ PYTHONPATH=src python -m cgra_agent.cli facts --kernel array_add --work work/fac
 
 # pin 密度消融（本文件 §2.2；贪心参考布局，不需要 trace）
 PYTHONPATH=src python scripts/eval_density.py
+
+# II=3 实验（本文件 §2.4）
+PYTHONPATH=src python scripts/eval_ii.py
 
 # 单点：只钉 50% 的关键路径节点
 scripts/run.sh run --kernel array_add --placer greedy --pin-ratio 0.5 --pin-rule critical
@@ -116,6 +121,37 @@ A 臂用 `--placer greedy` 代替 LLM（本机无模型端点；这是**参考�
 | array_cond | 25 | 32 | 1 | ✗ Route Failed（II=4） | ok II=4 lat=19 | II=4 lat=13 |
 | fft | 67 | 93 | 1 | ✗ mapper 崩溃 | ✗ | ✗ |
 
+### 2.4 II=3：pin 能不能把 PathFinder 从 II 的死局里拉回来？
+
+对 10 个 kernel 强制 `ii_start=3`（比基线低一档），k ∈ {0, 25%, 50%} × {degree, critical}。
+k=0 是 `-m 0` 基线；k>0 用贪心参考布局 + 固定选点、repair(3)。完整 60 行：`work/eval-ii/ii3.csv`。
+
+结论是**不能**，而且原因在 mapper 内部，不在 pin：
+
+| kernel | RecMin II | UserGiven II | mapper 实际 target II | k=0 结果 | pin 25%/50% |
+|---|---|---|---|---|---|
+| array_add | 4 | 3 | 4 | ok II=4 lat=11 | ok（II 仍是 4） |
+| trmm | 4 | 3 | 4 | ok II=4 lat=6 | ok（II 仍是 4） |
+| mults1 | 4 | 3 | 4 | ok II=4 lat=16 | ok（II 仍是 4） |
+| conv3 | 4 | 3 | 4 | ok II=4 lat=13 | ok（II 仍是 4） |
+| gemm / hpcg / array_cond / mac / conv2d | 4 | 3 | 4 | ok II=4 | 贪心布局在 II=3 不可行 |
+| gemm_pace | 9 | 3 | 9 | ok II=9 lat=13 | 贪心布局在 II=3 不可行 |
+
+机制：mapper 日志第一行就是
+`Initial target II = 4 (ResMin II = 2, RecMin II = 4, UserGiven II = 3)`——
+它取 `max(UserGiven, RecMin)`，**RecMin II 是图/架构的结构下界，pins 只约束位置、不改变 RecMin**。
+所以 II=3 对 9/10 个 kernel 结构性不可达（gemm_pace 的 RecMin 是 9），pin 密度无法改变这一层。
+能钉的 4 个 kernel 在 II=3 下，贪心布局也放不下（依赖延迟 + 3 个相位），pinned 尝试直接
+`placement_infeasible`；而允许 mapper 自己升到 RecMin 后，所有 kernel 本来就能映射。
+
+副产品：60 行里 `mults1 critical 50%` 一次 mapper 内部断言崩溃
+（`PathFinderMapper.cpp:3871 printHyCUBEBinary: Assertion 'pe->getSingleRegPort("ER_RI")...' failed`），
+report 写 ok 但没有 bitstream；已作为工具链 bug 记录，不影响结论。
+
+**对 A 臂的意义**：「pin 救 II」在 vendor mapper 里不成立——II 由 RecMin 锁死，pin 只能影响
+同一 II 内的放置/布线成功率。要让 pin 改变 II，得先改 RecMin 的算法（例如允许它向上/向下试探），
+那是工具链改动，不是布局提示能做的事。
+
 ## 3. 管线与设计决策
 
 ```
@@ -148,6 +184,15 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
   `<kernel>_trace_*.txt`；(c) 报错并写明需要 `gcc-multilib libc6-dev-i386`。禁止引用外部 marl 目录。
 * **槽位化**：`placers/__init__.py` 与 `routers/__init__.py` 是工厂；pipeline 只依赖
   `interfaces.Placer`/`Router` 协议。A 臂专属与共享工具的分界见 `docs/ARM_A_MODULES.md`。
+* **Router 契约定稿**（父代理批准改一次）：
+  `route(placement: Placement, facts: dict, arch: dict, ii: int, budget: dict) -> MapReport`，
+  5 个位置参数、无关键字别名。`facts["paths"] = {"dfg","arch_json","mem_alloc","workdir"}`
+  给 router 文件位置；`budget = {"pins_mode", "timeout_s"}`；`placement.pins` 为空走 `-m 0`。
+  `MapReport` 新增 `binary`/`binary_sha256`，router 负责写 bitstream，pipeline 只按字段取文件。
+* **LLM 路径脚手架**：`--placer llm` 在无 key 时用 `scripts/mock_replay.py`（坏 pin→好 pin）
+  跑通，输出与 `greedy/fixed` 同一套 `Placement`（`pins[] + ii + note + source`），预算/重试/落盘
+  行为一致；真模型只需 `export CGRA_LLM_{BASE_URL,API_KEY,MODEL}`。mock 回放 2 次调用可达
+  II=4 lat=11 243/0/133。
 
 ## 4. 已知限制
 
@@ -163,6 +208,10 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
 5. **仿真失败归因很粗**：只有「相位错」一条 CDD，未把失配地址映射回具体节点/边。
 6. `max_rounds=4` 与重试预算会互相挤压；未装包时需 `PYTHONPATH=src`（`pyproject.toml` 已备好）。
 7. 缺失 kernel 已有替代（见 §5），但替代 kernel 没有 trace，只能到 S5。
+8. **mapper 不接受低于 RecMin 的 II**（§2.4）：`-i 3` 会被 `max(UserGiven, RecMin)` 提升到 4/9，
+   且 method 3 也不跳 II。pinned 实验如果想考察「同 II 内的布线成功率」，必须在 RecMin 及以上做。
+9. `mults1 critical 50%` 触发 mapper 内部断言崩溃（`PathFinderMapper.cpp:3871`），report 声称 ok
+   但无 bitstream；工具链 bug，不修。
 
 ## 5. benchmark 集合（替换 md/stencil/spmv）
 
@@ -190,3 +239,5 @@ init -> dfg -> facts -> [place -> validate -> map -> sim] -> report
 3. 把「dense pin 是负收益」做成 prompt 约束：要求模型只给 20–50% 的关键节点，其余留给 PathFinder。
 4. CDD 细化：用 `SIMULATOR=1` 的 `kII/PC/x/y/OP` 定位到具体 PE，把责任分到节点或边。
 5. 合并：按 `docs/ARM_A_MODULES.md` 注册 B 臂的 `placers/sa.py`、`routers/llm.py`。
+6. 「pin 救 II」方向已封闭（§2.4）；若要继续 II 维度，唯一入口是改 RecMin 算法（工具链改动），
+   或者在同 RecMin 下比较 pinned/unpinned 的布线耗时与首次成功率。
