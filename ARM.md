@@ -266,6 +266,14 @@ trace 打通后（§7），对每种成功映射都跑了仿真（`work/simv/<k>
 
 `gemm_pace` 的 II=9/3600 cycles 来自 RecMin II=9，不是布局失败。`mac` 的 167 匹配对应它较小的数组。
 
+**后续（回溯版贪心，2026-10-27 晚）**：给贪心加 `max_backtracks=200`（默认，实际 gemm 用 10 次
+就够）后，gemm 在 II=4 能放出来了：26 pin、0.00s、`validate()` 0 error。但 mapper 的 strict
+模式仍拒绝 5 个 pin（`no candidate DP matches pin (x=3,y=0,t=1) for node 5 (op=ADD)`，
+`estimateRouting` 只给 54 个候选、不含该 PE×相位）——mapper 的 DP 候选集比我们的 R1/R2/R4
+窄，属于第三层约束（数据可用性），我们的 validate 不建模。repair 模式下 21/26 pin 被接受，
+II=4 lat=14（`-m 0` 基线 lat=13）。所以 gemm 的 `—` 现在应读作「可放置，但 strict 全 pin
+不可行」，不再读作「放不出」。
+
 ## 3. 管线与设计决策
 
 ```
