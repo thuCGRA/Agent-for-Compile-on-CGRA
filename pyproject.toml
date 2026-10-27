@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cgra-agent"
+version = "0.1.0"
+description = "CGRA compiler agent experiments: arm A is LLM placement + PathFinder routing"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.28", "PyYAML>=6"]
+
+[project.scripts]
+cgra-agent = "cgra_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

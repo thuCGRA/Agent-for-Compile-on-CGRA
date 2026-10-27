@@ -62,6 +62,7 @@ class Routes:
 class MapReport:
     ok: bool
     stage: str = ""        # done | placement | route | verify
+    failure_class: str = ""  # static | runtime | semantic | toolchain ("" = ok/unknown)
     ii: int = 0
     lat: int = 0
     pins_total: int = 0
@@ -71,6 +72,9 @@ class MapReport:
     conflicts: List[dict] = field(default_factory=list)  # {pe, cycle, port, edges}
     placement: List[dict] = field(default_factory=list)
     elapsed_s: float = 0.0
+    # 产物位置：router 负责写 bitstream，pipeline 只按这两个字段取文件/校验。
+    binary: str = ""
+    binary_sha256: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "MapReport":
@@ -100,6 +104,7 @@ class CDD:
     action: str            # repin | reroute | ii+1 | abort
     evidence: List[str] = field(default_factory=list)
     confidence: float = 0.0
+    failure_class: str = ""  # toolchain 失败不计入任何一臂的错误率
 
 
 # ---------------------------------------------------------------- 协议

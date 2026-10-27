@@ -1,13 +1,13 @@
 kernel: array_add
 # LLVM 段固定参数（每 kernel 一份，不经 LLM）
-c_source: benchmarks/array_add/array_add.c
+c_source: toolchain/vendor/dfggen/benchmarks/morpher_benchmarks/array_add/array_add.c
 function: array_add
 xdim: 4
 ydim: 4
 numberofbanks: 2
 banksize: 2048
 dfg_type: PartPred
-init_ii: 1
+init_ii: 4
 max_ii: 8
 
 # 线程与预算
