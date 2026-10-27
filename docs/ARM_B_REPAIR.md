@@ -134,3 +134,26 @@ B_plus_4_5  round 1 releasing [(4, 5)]    ok=True applied=19 flex=1 sim=Mismatch
 残余的跨周期情形交给仿真兜底，且**已知会以 abort 而不是 report 的形式出现**。
 上层 agent 若需要机器可读的结论，应把"仿真 abort"映射成一条不是预期的
 失败（当前 `SimResult.evidence = "simulator aborted: Assertion ..."`）。
+
+## 8. 第二轮发现的 verify 限制：寄存器长链会 abort，不能进 verify
+
+全程 pin（全部节点给定坐标与相位）时，`mac` / `mults1` 在 0.37s 内崩：
+
+```
+cgra_xml_mapper: .../arch/Module.cpp:606: CGRAXMLCompile::Port*
+CGRAXMLCompile::Module::getInPort(std::__cxx11::string): Assertion `false' failed.
+```
+
+日志里能看到的诱因是 A* 自己的解用了 **≥3 段寄存器跳**（`[route] 17->0 (30 ports)` 这类
+TREG_RO/TREG_RI 链）。`-m 0` 产出这种解没问题，但 verify 模式下重走路径时
+`getInPort("TREG_...")` 找不到对应入口而断言。
+
+结论与用法：
+
+- 这类解 **不是** verify 能校验的输入，归入已知不可静态检查（同 §7 的 runtime 残余）；
+- 上层应先判断"这份解要不要 3 段以上寄存器"，需要就把它标 flex 交给 A* 自己布，
+  而不是送进 `--routes`；
+- 该断言是 abort 而非 report，机器可读的出口仍是退出码 + 日志文本。
+
+复现：`python3 tools/ablation_fixii.py --stage full`，看
+`work/armB/fixii/mac/pins/r1/pins_r1.log`。
