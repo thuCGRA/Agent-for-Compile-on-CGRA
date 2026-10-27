@@ -16,8 +16,9 @@
 
 - 每格同一份请求（同一 pins、同一 routes）跑两次：A = 不带 `--verify`，B = 带 `--verify`。
 - 仿真喂 **A 的 bitstream**（未被 verify 干预的那一份），所以“verify 拒了”不会把被测对象藏起来。
-- 固定 II=4，`--pins_mode 3`（硬 pin）。pins_mode 不显式给定时 mapper 会静默忽略 `--pins`
-  （`pins_applied=0`），第一版矩阵就是被这个坑污染的，已修。
+- 固定 II=4。第一版矩阵用的 `--pins_mode 3` 是 `PINS_REPAIR`（修复提示，不是硬约束），
+  严格/偏好模式的对照见下文；pins_mode 不显式给定时 mapper 会静默忽略 `--pins`
+  （`pins_applied=0`），第一版矩阵也曾被这个坑污染，已在解析阶段改成硬错误。
 - 单元格含义：
 
 | 单元格 | 含义 |
