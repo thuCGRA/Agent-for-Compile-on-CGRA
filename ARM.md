@@ -372,6 +372,45 @@ fixture 存在 `tests/fixtures/llm_placement_response.json`，测试回放解析
 - **LLM 只有 `strict_accept ≥ 8/10` 且 `lat` 差 ≤ +1 才算有贡献**；只提 strict_accept
   而 lat 变差，只是换了一个代价旋钮。
 
+## 2.12 LLM 放置上真机：sim 列与 pin 计数修正
+
+真端点（deepseek-v4.1-flash）的 10 kernel 结果落地后，两处计量被修掉：
+
+**pins 计数**：`LLMMapper::writeReport` 原来把 `Map()` 每次放置尝试里的匹配次数
+累加进 `pins_applied`（conv3 因此出现 56/28）。现在：`pins_total` = DFG 节点数；
+`pins_applied` = 最终 placement 中与 pin 完全一致（x,y,t）的**不同节点数**；
+`pins_applied > pins_total` 直接抛 `logic_error`（report 先落盘再抛，机器仍可读）。
+`pins_mode` 里 repair 之前错写成 `off`，一并修正。
+
+**strict 结果（II=4，全部来自 `work/llm-cache` 真实响应，缓存重放）**
+
+| kernel | strict | lat | strict_sim | repair | repair lat | repair_sim |
+|---|---|---|---|---|---|---|
+| array_add | 20/20 ✓ | 21 | **sim-abort** `CGRATile.cpp:175` | 20/20 | 21 | sim-abort |
+| array_cond | 25/25 ✓ | 30 | sim-abort | 25/25 | 30 | sim-abort |
+| trmm | 11/11 ✓ | 12 | **verified** (15 cycles) | 11/11 | 12 | verified |
+| conv3 | 28/28 ✓ | 25 | sim-abort | 28/28 | 25 | sim-abort |
+| gemm | 15/26 ✗ | — | n/a | 20/26 | 25 | **verified** (38) |
+| conv2d | 8/39 ✗ | — | n/a | 33/39 | 36 | sim-abort |
+| gemm_pace | 6/49 ✗ (II=9) | — | n/a | 27/49 | 54 | sim-abort |
+| hpcg | 17/24 ✗ | — | n/a | 17/24 ✗ | — | n/a |
+| mac | 4/22 ✗ | — | n/a | 11/22 ✗ | — | n/a |
+| mults1 | 23/25 ✗ | — | n/a | 23/25 | — | **no-binary** |
+
+**结论**：strict_ok 不是成功率。四个"全接受"的放置里三个 bitstream 一跑就崩
+（array_add、array_cond、conv3），只有 trmm 真的 0 失配。repair 同理。所以 LLM
+臂的判读必须 `strict_sim`，不能只看 `pins_applied == pins_total`。
+
+**mults1 的 `no-binary` 定性**：`rep.json` 写 `ok=true`、`pins_applied=23/25`，
+但目录里没有 `*_binary.bin`。原因是 `CGRA_xml_compiler.cpp:187` 先 `MapWithPins`
+（写 report），`:249` 再 `printHyCUBEBinary`，后者在
+`PathFinderMapper.cpp:3871`（`ER_RI != EAST_XBARI` 断言）崩溃，rc=134。这是
+**工具链崩溃**，不是 pin 错、也不是路径找错——正好是 `check_artifacts` 里
+`toolchain` 类要记的情况；`scripts/eval_llm_placement.py` 现在把这条写进
+`repair_error`（"mapper reported ok but wrote no bitstream (rc=-6: ...)"）。
+
+数据：`work/eval-llm-sim/llm.csv`（21 列，含 `strict_error`/`repair_error`）。
+
 ## 3. 管线与设计决策
 
 ```

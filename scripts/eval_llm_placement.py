@@ -11,15 +11,19 @@ Per kernel:
   if strict fails, call 2 with the mapper's raw error text fed back verbatim
   (only the affected nodes are supposed to move) -> mapper strict again
   finally mapper repair (--pins_mode 3) on the last placement.
+  every successful placement is then simulated over the kernel's traces;
+  a mapper that says "ok" but writes no bitstream is recorded as no-binary.
 
-Columns: strict_accept, repair_accept, lat, mapper_time, llm_calls,
-prompt_tokens, completion_tokens; every raw response is written next to the CSV.
+Columns: strict_accept, repair_accept, lat, mapper_time, strict_sim,
+strict_cycles, repair_sim, repair_cycles, llm_calls, prompt_tokens,
+completion_tokens; every raw response is written next to the CSV.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import json
 import os
 import re
@@ -39,8 +43,10 @@ from cgra_agent.llm.client import LLMClient, LLMError  # noqa: E402
 from cgra_agent.llm.prompts import build_messages  # noqa: E402
 from cgra_agent.placers.llm import PlacementSchemaError, extract_json_object  # noqa: E402
 from cgra_agent.tools.facts import build_facts  # noqa: E402
-from cgra_agent.tools.jobdir import JobDir  # noqa: E402
+from cgra_agent.tools.jobdir import JobDir, ToolError  # noqa: E402
 from cgra_agent.tools.mapper import SUCCESS_RE  # noqa: E402
+from cgra_agent.tools.sim import run_sim  # noqa: E402
+from cgra_agent.tools.trace import find_traces  # noqa: E402
 
 KROOT = os.path.join(ROOT, "work", "kernels")
 MAPPER = os.path.join(ROOT, "toolchain/out/cgra_xml_mapper")
@@ -48,13 +54,56 @@ WORK = os.path.join(ROOT, "work", "eval-llm")
 CACHE = os.path.join(ROOT, "work", "llm-cache")
 KERNELS = ["array_add", "array_cond", "trmm", "hpcg", "gemm", "gemm_pace",
            "conv3", "conv2d", "mac", "mults1"]
-ELAPSED_RE = re.compile(r"Elapsed time in seconds:\s*(\d+)\s*ms")
 FAIL_RE = re.compile(r"(no candidate DP matches pin[^\n]*|Route Failed[^\n]*)")
+SIM_RESULT_RE = re.compile(r"Simulation Result: Matches::(\d+), Mismatches::(\d+)")
+SIM_CYCLES_RE = re.compile(r"CGRA cycles:\s*(\d+)")
 
 COLS = ["kernel", "strict_ok", "strict_accept", "strict_ii", "strict_lat",
-        "strict_mapper_s", "repair_ok", "repair_accept", "repair_ii", "repair_lat",
-        "repair_mapper_s", "llm_calls", "cached_calls", "prompt_tokens",
-        "completion_tokens", "strict_error", "status"]
+        "strict_mapper_s", "strict_sim", "strict_cycles", "repair_ok",
+        "repair_accept", "repair_ii", "repair_lat", "repair_mapper_s",
+        "repair_sim", "repair_cycles", "repair_error", "llm_calls", "cached_calls",
+        "prompt_tokens", "completion_tokens", "strict_error", "status"]
+
+
+def find_binary(work):
+    """Mapper writes the bitstream next to the DFG, sometimes one level up."""
+    cands = []
+    for pattern in ("*_binary.bin", os.path.join("..", "*_binary.bin")):
+        cands.extend(glob.glob(os.path.join(work, pattern)))
+    if not cands:
+        return ""
+    return max(cands, key=os.path.getmtime)
+
+
+def sim_best(kernel, work, binary):
+    """Best-of-traces simulation of one bitstream."""
+    if not binary or not os.path.isfile(binary):
+        return "no-binary", ""
+    binary = os.path.abspath(binary)
+    traces = find_traces(ROOT, kernel, {}, os.path.join(ROOT, "work", "kernels", kernel))
+    traces = [os.path.abspath(t) for t in traces if "_trace_" in os.path.basename(t)]
+    if not traces:
+        return "no-trace", ""
+    alloc = os.path.join(KROOT, kernel, "mem_alloc.txt")
+    job = JobDir(os.path.abspath(work))
+    best = ("sim-abort", "")
+    for idx, trace in enumerate(traces[:4]):
+        try:
+            out = run_sim(job, repo_root=ROOT, binary=binary, trace=trace,
+                          mem_alloc=alloc, xdim=4, ydim=4, mem_size=4096,
+                          timeout=120, log_name="sim-%d.log" % idx)
+        except ToolError as exc:
+            return "sim-abort", str(exc).splitlines()[0][:120]
+        ev = out.result.evidence or ""
+        matches, mismatches = out.result.matches, out.result.mismatches
+        cycles = str(out.result.cycles) if out.result.cycles else ""
+        if matches > 0:
+            if mismatches == 0:
+                return "verified", cycles
+            best = ("mismatch", cycles)
+        elif "aborted" in ev or "Assertion" in ev:
+            best = ("sim-abort", "")
+    return best
 
 
 def mapper_run(kernel, pins, mode, pins_mode, ii):
@@ -74,7 +123,8 @@ def mapper_run(kernel, pins, mode, pins_mode, ii):
         proc = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         return {"ok": False, "ii": "", "lat": "", "error": "mapper timeout (120s)",
-                "applied": 0, "total": len(pins), "secs": 120.0}
+                "applied": 0, "total": len(pins), "secs": 120.0, "binary": "",
+                "work": work}
     secs = round(time.time() - started, 2)
     report = {}
     if os.path.isfile(os.path.join(work, "rep.json")):
@@ -87,7 +137,15 @@ def mapper_run(kernel, pins, mode, pins_mode, ii):
         report["ii"] = int(m.group(1))
         report["lat"] = int(m.group(2))
     ok = bool(m) or bool(report.get("ok"))
+    binary = find_binary(work) if ok else ""
     err = ""
+    if ok and not binary:
+        # report says success but no bitstream: printHyCUBEBinary crashed after
+        # Map() returned, so the report is written before the abort.  This is a
+        # toolchain failure, not a placement one (see tools/mapper.check_artifacts).
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        last = tail[-1][:120] if tail else "no output"
+        err = "mapper reported ok but wrote no bitstream (rc=%s: %s)" % (proc.returncode, last)
     if not ok:
         err = report.get("error") or ""
         if not err:
@@ -95,7 +153,8 @@ def mapper_run(kernel, pins, mode, pins_mode, ii):
             err = f.group(1) if f else (proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "mapper failed")
     return {"ok": ok, "ii": report.get("ii", ""), "lat": report.get("lat", ""),
             "error": err, "applied": report.get("pins_applied", 0),
-            "total": report.get("pins_total", len(pins)), "secs": secs}
+            "total": report.get("pins_total", len(pins)), "secs": secs,
+            "binary": binary, "work": work}
 
 
 def parse_placement(text, ii):
@@ -199,6 +258,19 @@ def main(argv=None):
                     error = "schema after feedback: %s" % exc
             repair = mapper_run(kernel, pins, "repair", 3, ii)
 
+        strict_sim = strict_cycles = ""
+        repair_sim = repair_cycles = ""
+        if strict is not None:
+            if strict["ok"]:
+                strict_sim, strict_cycles = sim_best(kernel, strict["work"], strict["binary"])
+            else:
+                strict_sim = "n/a"
+        if repair is not None:
+            if repair["ok"]:
+                repair_sim, repair_cycles = sim_best(kernel, repair["work"], repair["binary"])
+            else:
+                repair_sim = "n/a"
+
         def acc(r):
             return "" if not r else "%s/%s" % (r.get("applied"), r.get("total"))
 
@@ -209,11 +281,16 @@ def main(argv=None):
             "strict_ii": (strict or {}).get("ii", ""),
             "strict_lat": (strict or {}).get("lat", ""),
             "strict_mapper_s": (strict or {}).get("secs", ""),
+            "strict_sim": strict_sim,
+            "strict_cycles": strict_cycles,
             "repair_ok": bool(repair and repair["ok"]),
             "repair_accept": acc(repair),
             "repair_ii": (repair or {}).get("ii", ""),
             "repair_lat": (repair or {}).get("lat", ""),
             "repair_mapper_s": (repair or {}).get("secs", ""),
+            "repair_sim": repair_sim,
+            "repair_cycles": repair_cycles,
+            "repair_error": (repair or {}).get("error", ""),
             "llm_calls": llm_calls,
             "cached_calls": cached_calls,
             "prompt_tokens": int(usage1.get("prompt_tokens") or 0),
@@ -221,11 +298,11 @@ def main(argv=None):
             "strict_error": error,
             "status": "ok" if (strict and strict["ok"]) else ("repair-only" if (repair and repair["ok"]) else "failed"),
         })
-        print("%-10s strict=%-5s accept=%-7s II=%-2s lat=%-3s %6ss | repair=%-5s %s II=%s lat=%s | calls=%d cached=%d" % (
+        print("%-10s strict=%-5s accept=%-7s II=%-2s lat=%-3s sim=%-8s | repair=%-5s %s II=%s lat=%s sim=%s | calls=%d cached=%d" % (
             kernel, rows[-1]["strict_ok"], rows[-1]["strict_accept"], rows[-1]["strict_ii"],
-            rows[-1]["strict_lat"], rows[-1]["strict_mapper_s"], rows[-1]["repair_ok"],
+            rows[-1]["strict_lat"], rows[-1]["strict_sim"], rows[-1]["repair_ok"],
             rows[-1]["repair_accept"], rows[-1]["repair_ii"], rows[-1]["repair_lat"],
-            llm_calls, cached_calls))
+            rows[-1]["repair_sim"], llm_calls, cached_calls))
 
     os.makedirs(WORK, exist_ok=True)
     out_csv = os.path.join(WORK, "llm.csv")
