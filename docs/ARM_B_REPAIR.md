@@ -157,3 +157,27 @@ TREG_RO/TREG_RI 链）。`-m 0` 产出这种解没问题，但 verify 模式下�
 
 复现：`python3 tools/ablation_fixii.py --stage full`，看
 `work/armB/fixii/mac/pins/r1/pins_r1.log`。
+
+## 9. `getInPort` 断言已修：从 abort 变成冲突报告，剩下的静态盲区
+
+§8 记的 `Module.cpp:606 getInPort` 断言不再是 abort。两处修改都在 vendored mapper 里，
+随 `0002-mapper.patch` 走：
+
+1. `Module::lookupInPort(name)`：与 `getInPort` 同样的查表，但查不到返回 `NULL` 而不是断言；
+2. `lookupDestPort(src, dst)`：先按 DFG 里的 operand 槽名查（`I1`/`I2`/`P`），失败再试
+   `DP0_` 前缀（数据通路的实际命名），仍失败才交给调用方报冲突。
+
+修复前后（`mac`，全 pin，II=4）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| verify 结果 | `Assertion 'false' failed`，进程 abort（rc=134） | `ok=false`，1 条 `route` 冲突（rc=1，19 ms） |
+
+剩下的静态盲区：`mac` 的 `(8,0)`、`mults1` 的 `(12,0)` 报
+`cannot resolve the port names for this edge`。这两条边的目的节点（`idx=0`）在 DFG 里
+没有可用的 operand 槽名，也就是说**静态元数据不足以判断工具链会把这个操作数绑到哪个
+物理端口**。这不是"解非法"，是"静态判不了"——所以 verify 只报冲突、不去猜。
+
+对上层的意思：`mac` / `mults1` 在 II=4 下**不可 verify**（不是因为布线质量），
+要么换 II、要么只用仿真兜底，要么等 DFG 生成端把 operand 槽名补全。
+`array_add` / `conv2d` / `conv3` 不受影响。

@@ -19,7 +19,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from ..interfaces import MapReport, Placement, RouteEdge, Routes
-from .base import Edge, select_edges, shortest_path
+from .base import Edge, REG_HOP_LIMIT, register_hops, select_edges, shortest_path
 
 
 def paths_of(facts: dict) -> dict:
@@ -58,6 +58,7 @@ class RulePolicy:
 
         routes = Routes()
         self.unpathed: List[Edge] = []
+        self.regskipped: List[Edge] = []
         avoid: Dict[Tuple[int, int, int, int], int] = {}
         for e in chosen:
             path = self.bank.get(e) if self.path_mode == "bank" else None
@@ -72,6 +73,13 @@ class RulePolicy:
                             avoid[(path[i][0], path[i][1],
                                    path[i + 1][0], path[i + 1][1])] = 1
             if path is None:
+                self.unpathed.append(e)
+                continue
+            slack = lat.get(e[1], 0) - lat.get(e[0], 0)
+            rh = register_hops(path, slack)
+            if rh >= REG_HOP_LIMIT:
+                # verify re-walking such a path trips Module.cpp:606 (see docs/ARM_B_REPAIR.md 8)
+                self.regskipped.append(e)
                 self.unpathed.append(e)
                 continue
             routes.edges.append(RouteEdge(src=e[0], dst=e[1],
@@ -114,6 +122,7 @@ class RulePolicy:
             "edges_total": len(facts["edges"]),
             "proposed": len(routes.edges),
             "unpathed": ["(%d,%d)" % e for e in getattr(self, "unpathed", [])],
+            "regskipped": ["(%d,%d)" % e for e in getattr(self, "regskipped", [])],
             "accepted": rep.routes_applied,
             "rejected": rep.routes_rejected,
             "reject_reasons": reasons[:10],

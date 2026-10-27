@@ -29,7 +29,7 @@ REPO = "/home/steve/cac-armB"
 MAPPER = os.path.join(REPO, "toolchain/out/cgra_xml_mapper")
 OUT = os.path.join(REPO, "work/armB/fixii")
 ARMA = "/home/steve/cac-armA/work/armA"
-KERNELS = ["array_add", "conv2d", "conv3", "mac", "mults1"]
+KERNELS = os.environ.get("KERNELS_ENV", "array_add,conv2d,conv3,mac,mults1").split(",")
 II, XD, YD = 4, 4, 4
 TIMEOUT = 300
 

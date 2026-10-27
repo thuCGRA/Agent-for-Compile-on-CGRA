@@ -73,6 +73,26 @@ def select_edges(edges: Sequence[Edge], rule: str, k: int,
     return ordered[:k]
 
 
+FORWARD_PER_CYCLE = 2
+"""HyCUBE 一个周期能转发过的邻居数（实测：2 跳/0 拍合法，4 跳/0 拍不可实现）。"""
+
+REG_HOP_LIMIT = 3
+"""超过这个段数的寄存器链，verify 重走路径时会踩 Module.cpp:606 getInPort 断言。"""
+
+
+def register_hops(path, slack: int) -> int:
+    """估算一条具体路径需要几段寄存器跳（TREG 链）。
+
+    组合跳不花周期（HyCUBE 在邻居里转发），所以 slack + 1 个周期最多容纳
+    FORWARD_PER_CYCLE * (slack + 1) 跳；超出的部分要靠寄存器打拍，一段一跳。
+    这个换算是经验公式，用途只有一个：把明显会拖长寄存器链的路径提前剔掉，
+    别送进 --routes 让 verify 崩。
+    """
+    hops = max(0, len(path) - 1)
+    budget = FORWARD_PER_CYCLE * (max(0, int(slack)) + 1)
+    return max(0, hops - budget)
+
+
 def shortest_path(a: Tuple[int, int], b: Tuple[int, int],
                   x_max: int = 4, y_max: int = 4,
                   avoid: Optional[Dict[Tuple[int, int, int, int], int]] = None,

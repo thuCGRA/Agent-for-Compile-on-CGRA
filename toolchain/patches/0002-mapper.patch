@@ -1,3 +1,17 @@
+diff --git a/include/morpher/arch/Module.h b/include/morpher/arch/Module.h
+index c6cc802..eb45b67 100755
+--- a/include/morpher/arch/Module.h
++++ b/include/morpher/arch/Module.h
+@@ -45,6 +45,9 @@ public:
+ 	std::vector<Module *> subModules;
+ 
+ 	Port *getInPort(std::string Pname);
++	// verify mode asks for a port by op-type name and must be able to
++	// report "this module has no such input" instead of aborting the process
++	Port *lookupInPort(std::string Pname);
+ 	Port *getOutPort(std::string Pname);
+ 	Port *getInternalPort(std::string Pname);
+ 	Port* getSocketPort(std::string Pname);
 diff --git a/include/morpher/mapper/HeuristicMapper.h b/include/morpher/mapper/HeuristicMapper.h
 index 2877e32..19070d6 100755
 --- a/include/morpher/mapper/HeuristicMapper.h
@@ -312,12 +326,35 @@ index 135f487..8df214e 100755
  	return 0;
  }
 \ No newline at end of file
+diff --git a/src/arch/Module.cpp b/src/arch/Module.cpp
+index eea45fe..dac0186 100755
+--- a/src/arch/Module.cpp
++++ b/src/arch/Module.cpp
+@@ -606,6 +606,18 @@ CGRAXMLCompile::Port *CGRAXMLCompile::Module::getInPort(std::string Pname)
+ 	assert(false);
+ }
+ 
++CGRAXMLCompile::Port *CGRAXMLCompile::Module::lookupInPort(std::string Pname)
++{
++	for (Port *p : inputPorts)
++	{
++		if (p->getName().compare(Pname) == 0)
++		{
++			return p;
++		}
++	}
++	return NULL;
++}
++
+ CGRAXMLCompile::Port *CGRAXMLCompile::Module::getOutPort(std::string Pname)
+ {
+ 	for (Port *p : outputPorts)
 diff --git a/src/mapper/LLMMapper.cpp b/src/mapper/LLMMapper.cpp
 new file mode 100755
-index 0000000..b9cc2ab
+index 0000000..63143f1
 --- /dev/null
 +++ b/src/mapper/LLMMapper.cpp
-@@ -0,0 +1,1372 @@
+@@ -0,0 +1,1391 @@
 +/*
 + * LLMMapper.cpp
 + *
@@ -367,6 +404,25 @@ index 0000000..b9cc2ab
 +		}
 +	}
 +	return cap;
++}
++
++
++// The op->port table the DFG carries names the operand slot ("I1"/"I2"/"P"),
++// while a PE data-path module prefixes it ("DP0_I1"). Try the bare name first,
++// then the prefixed one, and let the caller report a conflict if neither exists.
++static CGRAXMLCompile::Port *lookupDestPort(CGRAXMLCompile::DFGNode *src, CGRAXMLCompile::DFGNode *dst)
++{
++	if (dst == NULL || dst->rootDP == NULL)
++	{
++		return NULL;
++	}
++	std::string name = src->getOPtype(dst);
++	CGRAXMLCompile::Port *p = dst->rootDP->lookupInPort(name);
++	if (p != NULL)
++	{
++		return p;
++	}
++	return dst->rootDP->lookupInPort("DP0_" + name);
 +}
 +
 +static std::string strint(int v) { return std::to_string(v); }
@@ -1043,7 +1099,7 @@ index 0000000..b9cc2ab
 +		return false;
 +	}
 +	Port *startPort = srcDP->getOutputPort(opit->second);
-+	Port *endPort = dst->rootDP->getInPort(src->getOPtype(dst));
++	Port *endPort = lookupDestPort(src, dst);
 +	if (startPort == NULL || endPort == NULL)
 +	{
 +		addConflict("route", lastX, lastY, endLat, src->idx, dst->idx, "",
@@ -1615,7 +1671,7 @@ index 0000000..b9cc2ab
 +			// no external route: fall back to the internal A* so that a partial
 +			// route set still yields a complete mapping
 +			Port *startPort = srcDP->getOutputPort(oplat);
-+			Port *endPort = dst->rootDP->getInPort(src->getOPtype(dst));
++			Port *endPort = lookupDestPort(src, dst);
 +			if (startPort == NULL || endPort == NULL)
 +			{
 +				addConflict("route", dst->rootDP->getPE()->X, dst->rootDP->getPE()->Y, dstLat, src->idx, dst->idx, "",
