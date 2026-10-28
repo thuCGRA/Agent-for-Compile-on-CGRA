@@ -349,3 +349,47 @@ array_add 的结果：
 这就是 LLM 该介入的位置——不是给 mapper 指定位置，而是在"这个 kernel 需要多大阵列"上做判断，判据是 facts 里的节点数、算子构成、ResMII 和 bank 访问模式。而验证它是廉价的：仿真一次就能证伪。
 
 下一步：把 10 个 kernel × {4x4, 3x3, 2x2} 扫完，做出面积-周期的 Pareto 前沿；再让 LLM 只看 facts 选尺寸，与穷举结果比对。
+
+## 21. 全量架构扫描：3x3 免费省一半 PE，决策几乎不需要智能
+
+`scripts/exp_arch_sweep_all.py`，10 个 kernel × {4x4, 3x3, 2x2}，PathFinder 放置 → dump → 回灌拿 bitstream → 仿真：
+
+| kernel | 4x4 | 3x3 | 2x2 |
+|---|---|---|---|
+| array_add | II4 lat11 **134c** 387/0 | II4 lat11 **133c** 387/0 | II5 lat19 **164c** 387/0 |
+| array_cond | II4 lat13 **86c** 243/0 | II4 lat15 **85c** 243/0 | II7 lat22 **142c** 243/0 |
+| trmm | II4 lat6 **9c** 5/0 | 9c 5/0 | II4 lat6 **9c** 5/0 |
+| gemm | II4 lat13 **38c** 783/0 | II4 lat13 **37c** 783/0 | II7 lat16 **60c** 783/0 |
+| hpcg | II4 lat11 **22c** 90/1 | 22c 90/1 | II8 lat20 **38c** 90/1 |
+| conv2d | II4 lat15 | II5 lat20 | II11 lat30 |
+| conv3 | II4 lat13 | II4 lat13 | II7 lat22 |
+| mac | II4 lat10 | II4 lat10 | II7 lat17 |
+| mults1 | II4 lat16 | II4 lat17 | II7 lat27 |
+| gemm_pace | II9 lat13 | II9 lat17 | **map-fail** |
+
+（`sim-skipped` 的六个 kernel 缺 trace，只有映射数据；hpcg 的 90/1 是已知的 trace 对齐问题，记 unverified。）
+
+### 三条结论
+
+1. **3x3 在四个可验证 kernel 上周期数全部持平或低 1 个周期**（133/134、85/86、37/38、9/9），根本没有 4x4 的用武之地——4x4 在这个 benchmark 上是纯浪费。
+2. 2x2 才开始收费：II 从 4 涨到 5–11，array_add 164c（超 10% 阈值）、gemm 60c、conv2d II=11。gemm_pace 在 2x2 直接映射失败。
+3. 决策空间因此是**退化的**：正确答案恒为"3x3，除非 kernel 只有十来个节点（trmm）"。
+
+### 决策质量的量化
+
+判据固定为"功能通过 且 周期 ≤ 4x4 的 110%"：
+
+| 策略 | 总 PE 数（4 个可验证 kernel） | 相对最优 |
+|---|---|---|
+| 全部 4x4 | 64 | +106% |
+| 全部 3x3 | 36 | **+16%** |
+| 最优（3,3,2,3） | 31 | — |
+| 全部 2x2 | 不可行（array_add、gemm 超阈值） | — |
+
+**一条"用 3x3"的常数规则就落在最优解 16% 以内，且零搜索、零调用。**
+
+### LLM 选尺寸的尝试（未完成）
+
+`scripts/exp_llm_arch.py` 让模型只看 facts 选 2/3/4。四次调用全部没有可解析答案：端点把预算耗在推理通道上，正文被截断（回复停在 "Memory PEs are only in row 0: ("），换成 `SIZE=<n>` 强制格式后仍然为空。唯一一次完整回答（trmm）给的是 **4x4**，而正解是 2x2，理由是"需要 4 个 memory PE"——实际 trmm 只有 2 个 bank，2x2 的两个 memory PE 就够，仿真也证明 2x2 能过。
+
+这条线暂时无法给出"模型比规则好"的证据；而规则本身已经接近最优，说明**架构尺寸这一层也没有留给 LLM 的空间**。
