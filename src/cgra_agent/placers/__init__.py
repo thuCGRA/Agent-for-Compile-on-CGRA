@@ -26,6 +26,8 @@ _PLACERS = {
     "greedy": "greedy",  # 参考布局
     "rule": "rule",      # 廉价规则基线（无搜索）
     "fixed": "fixed",    # 回放 pins.json
+    "sa": "morpher -m 1 (模拟退火)",   # B 臂：借用 Morpher 自带放置器
+    "lisa": "morpher -m 2 (LISA)",     # B 臂：同上，当前 vendor 版本会 abort
 }
 
 
@@ -47,6 +49,10 @@ def make_placer(
         from .rule import RulePlacer
 
         return RulePlacer()
+    if kind in ("sa", "lisa"):
+        from .morpher import MorpherPlacer
+
+        return MorpherPlacer(1 if kind == "sa" else 2, name=kind)
     if kind == "fixed":
         if not pins_file:
             raise ValueError("placer=fixed needs a pins file")

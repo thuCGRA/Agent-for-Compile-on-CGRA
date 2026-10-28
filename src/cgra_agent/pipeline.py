@@ -405,7 +405,9 @@ class Pipeline:
                     ii,
                     {"max_llm_calls": max_llm_calls,
                      "remaining_s": deadline.remaining(),
-                     "deadline": deadline},
+                     "deadline": deadline,
+                     "paths": {"dfg": dfg.dfg, "arch_json": dfg.arch,
+                               "mem_alloc": dfg.mem_alloc}},
                     feedback=feedback,
                     previous=previous,
                 )

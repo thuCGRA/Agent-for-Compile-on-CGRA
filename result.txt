@@ -50,3 +50,5 @@
  /home/steve/CGRA_Agent_Compiler/work/kernels/mac/dfg.xml method:LLM 4 2
  /home/steve/CGRA_Agent_Compiler/work/kernels/mults1/dfg.xml method:LLM 4 4
  /home/steve/CGRA_Agent_Compiler/work/kernels/trmm/dfg.xml method:LLM 4 0
+ work/kernels/array_add/dfg.xml method:SA_pf 4 1
+ work/kernels/array_add/dfg.xml method:SA_pf 4 0
