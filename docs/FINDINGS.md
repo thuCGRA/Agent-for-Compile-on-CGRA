@@ -302,3 +302,25 @@ array_add 的结果：
 不是"提示词还不够好"，也不是"约束还不够弱"，而是：**在 II 固定的前提下，任何外部给定的放置都会比 A*/SA 自己搜出来的差**，因为它把一个已经联合优化过的问题拆成了两段。
 
 所以 LLM 在这个链条里的位置需要重新找：它不该去约束 mapper 的放置，而该去改 mapper 的输入——DFG 的形状（算子融合、循环展开、bank 划分）或架构本身。
+
+## 19. bank 分配不影响映射质量
+
+`scripts/exp_bank_layout.py`：DFG、trace、II 全不动，只把 `mem.json` 里某个变量的 `DATA_LAYOUT` 从一块 SPM 挪到另一块，再跑 mapper。
+
+| kernel | base | 变体 |
+|---|---|---|
+| array_add | II=4 lat=11 | A→B1 / C→B1 / B→B0 均 II=4 lat=11 |
+| conv3 | II=4 lat=13 | b→B1 / a→B0 均 II=4 lat=13 |
+
+映射结果逐项相同。也就是说在这个规模上，**变量落在哪块 bank 不影响 mapper 找到的解**——它本来就只把 bank 当作 memory PE 的归属约束，而 4x4 里 memory PE 只有一列，挪 bank 不改变可达性。
+
+配套限制：`-m 0` 与 `-m 1`（SA）都不写 bitstream，本仓库只有"带 pin 的 method 3"路径会输出 `.bin`，所以这一轮的结论止于映射级（II/lat），没有仿真对照。要让 bank 变体也进仿真，得走"SA dump 放置 → 作为 pin 回灌 method 3"那条老路。
+
+### 到目前为止能站住的判断
+
+1. 放置接口（全量 pin / 仅内存 pin）都会让结果变差，弱到"bank 决定 memory PE"也一样；
+2. bank 分配在 4x4 上是平空间；
+3. 静态校验双向不可靠，仿真才是真值；
+4. SA 放置 + PathFinder 是目前最好的组合（10 个 kernel 里 6 个功能通过）。
+
+**这四条合起来指向一个结论：在 4x4 HyCUBE、II 固定的条件下，agent 层能优化的空间不在"给 mapper 出主意"，而在"选哪个架构/哪个 DFG 交给 mapper"。** 下一步应该去做架构参数（阵列尺寸）与 DFG 变换的扫描，那里 II 会真的变。
