@@ -168,7 +168,7 @@ def call_or_cache(client, cache, kernel, dfg_sha, ii, messages, out_dir, tag):
     hit = cache.get(key)
     if hit is not None:
         return hit.get("response", ""), True, hit.get("usage") or {}
-    text = client.chat(messages, temperature=0.0, max_tokens=4096)
+    text = client.chat(messages, temperature=0.0, max_tokens=16384)
     usage = (client.records[-1].get("usage") or {}) if client.records else {}
     cache.put(key, text, usage=usage)
     os.makedirs(out_dir, exist_ok=True)
@@ -241,11 +241,24 @@ def main(argv=None):
                     header="The mapper rejected this placement: %s" % error[:400],
                 )
                 messages2 = build_messages(facts, ii, feedback=repaired or error)
-                raw2, cached2, usage2 = call_or_cache(client, cache, kernel, dfg_sha, ii,
-                                                      messages2, out_dir, "call2")
-                llm_calls += 1
-                cached_calls += 1 if cached2 else 0
-                usage1 = _add_usage(usage1, usage2)
+                if os.environ.get("CGRA_DUMP_PROMPTS"):
+                    with open(os.path.join(out_dir, "call2-prompt.json"), "w") as fh:
+                        json.dump({"feedback": repaired or error, "messages": messages2}, fh, indent=1)
+                try:
+                    raw2, cached2, usage2 = call_or_cache(client, cache, kernel, dfg_sha, ii,
+                                                          messages2, out_dir, "call2")
+                except LLMError as exc:
+                    # The reasoning channel can eat the whole budget and leave
+                    # content empty; record it instead of losing the kernel.
+                    error = "call2_empty: %s" % str(exc)[:200]
+                    raw2 = ""
+                else:
+                    llm_calls += 1
+                    cached_calls += 1 if cached2 else 0
+                    usage1 = _add_usage(usage1, usage2)
+                if os.environ.get("CGRA_DUMP_PROMPTS"):
+                    with open(os.path.join(out_dir, "call2-raw.txt"), "w") as fh:
+                        fh.write(raw2 or "")
                 try:
                     placement2 = parse_placement(raw2, ii)
                     pins = [asdict(p) for p in placement2.pins]

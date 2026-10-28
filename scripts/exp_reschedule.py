@@ -38,6 +38,23 @@ def run(kernel, ii=4):
     pins = json.load(open(src))["pins"]
     spatial = {int(p["node"]): (int(p["x"]), int(p["y"])) for p in pins}
 
+    # The mapper accepts a memory op only on the x=0 column and an ALU op only
+    # off it (probe: node 5 accepted at y=0 and y=3, so the bank is *not* what
+    # gates a pin -- the column is).  Snap to that feasible set before timing.
+    f0 = build_facts(os.path.join(REPO, "work/kernels", kernel, "dfg.xml"),
+                     os.path.join(REPO, "work/kernels", kernel, "mem.json"), ii)
+    alu_pes, mem_pes = f0["pe_alu"], f0["pe_mem"]
+    ops = {n["idx"]: n["op"] for n in f0["nodes"]}
+    load = {}
+    for node, xy in list(spatial.items()):
+        op = ops.get(node, "")
+        is_mem = op.startswith(("LOAD", "STORE"))
+        if is_mem and xy[0] != 0:
+            spatial[node] = min(mem_pes, key=lambda p: abs(p[1] - xy[1]))
+        elif (not is_mem) and xy[0] == 0:
+            spatial[node] = min(alu_pes, key=lambda p: (load.get(p, 0), abs(p[1] - xy[1])))
+        load[spatial[node]] = load.get(spatial[node], 0) + 1
+
     facts = build_facts(os.path.join(REPO, "work/kernels", kernel, "dfg.xml"),
                         os.path.join(REPO, "work/kernels", kernel, "mem.json"), ii)
     try:
