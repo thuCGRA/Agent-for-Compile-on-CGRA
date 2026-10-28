@@ -393,3 +393,36 @@ array_add 的结果：
 `scripts/exp_llm_arch.py` 让模型只看 facts 选 2/3/4。四次调用全部没有可解析答案：端点把预算耗在推理通道上，正文被截断（回复停在 "Memory PEs are only in row 0: ("），换成 `SIZE=<n>` 强制格式后仍然为空。唯一一次完整回答（trmm）给的是 **4x4**，而正解是 2x2，理由是"需要 4 个 memory PE"——实际 trmm 只有 2 个 bank，2x2 的两个 memory PE 就够，仿真也证明 2x2 能过。
 
 这条线暂时无法给出"模型比规则好"的证据；而规则本身已经接近最优，说明**架构尺寸这一层也没有留给 LLM 的空间**。
+
+## 22. 把时间交给编译器：array_add 从 ABORT 救回 PASS
+
+按 §19 的判断做了一次职责切分：LLM 只决定"节点放哪个 PE"，相位（``t``）由编译器算。`src/cgra_agent/tools/legalize.py` 实现了一个单调调度器，约束取自烧写器的真实行为：
+
+1. 依赖松弛：``(t_c - t_p - ni*II) mod II >= lat_p``（不是等式，等式会把合法的组合直通解全部排除）；
+2. SELECT/CMERGE 的两个数据父节点不得同相位（`CGRATile.cpp:175` 的断言）；
+3. 同一 PE 同一相位只能有一个节点（mapper 的 DP 占用）。
+
+调度只把节点往后推，配一个相位退火兜底（贪心会钻进死角）。
+
+### 结果
+
+取 LLM 的 spatial 放置、丢掉它给的 ``t``、重新定时后重跑：
+
+| kernel | LLM 原始 | 重定时 |
+|---|---|---|
+| array_add | II4 lat21 **ABORT** | II4 lat10 **134c 387/0 通过** |
+| array_cond | ABORT | map-fail（strict/prefer 都拒） |
+| conv3 | ABORT | map-fail |
+| gemm | ABORT | map-fail |
+
+array_add 的周期数（134）与 A* 基线完全一致，延迟还比 LLM 自己排的（21）低一半——说明 LLM 的空间选择本身没问题，坏在时序。
+
+### 但只有 1/4 被救回
+
+另外三个在重定时后连映射都过不去：不是时序错了，是**空间上 mapper 的 DP 候选集不接受**。这和早先"strict 拒绝合法 pin"是同一件事。
+
+所以结论要分两层：
+- **时序**：可以完全交给编译器，已经证明（array_add）；
+- **空间**：LLM 给出的 (x,y) 仍要过 mapper 的候选集这一关，`repair` 会丢掉过不去的那部分，丢多了就退化成普通 A*。
+
+下一步的自然做法是：让 LLM 只在"可放置的 PE 集合"里选（facts 里就能算出来），或者让 repair 丢弃后由编译器补全剩余节点，而不是整盘重来。
