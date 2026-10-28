@@ -504,7 +504,7 @@ class Pipeline:
             # Replaying a stored placement (placer=fixed) is an evaluation path:
             # the whole point is to observe what the mapper does with these pins,
             # so a validator error must not short-circuit the run.
-            if val["errors"] and self.placer != "fixed":
+            if val["errors"] and self.placer_kind != "fixed":
                 attempts.append(record)
                 buckets["validate"] += 1
                 self._say(

@@ -213,3 +213,30 @@ P=INV,I1=0,I2=1,...
 结果：array_add / gemm / conv3 都在 PE X1Y0、t=0 命中，与模拟器的 PE(1,0) 一致；**但 trmm 也被命中 2 条，而 trmm 仿真通过**。说明 `routeInfo.log` 里的 `T` 是配置槽位而不是绝对周期，且同一父边会在 WR_RI/WR_RO 多级重复出现，直接当成到达时刻会重复计数。
 
 结论：判断的**对象**找对了（SELECT 的两个操作数槽位），**时间轴**还没对准。下一步不再从 `routeInfo` 反推，而是直接用模拟器的逐周期打印标定到达时刻，再回到静态侧拟合。
+
+## 16. 借用 Morpher 自带的放置器：SA 放置 + A* 布线，6/10 功能通过
+
+不再自己写 SA，而是直接用 mapper 的内置放置器（`-m 1` = SAMapper，`-m 2` = LISAMapper），
+用 `--dump-placement` 把最终放置读回来，作为 B 臂的布局来源（`placers/morpher.py`，
+提交 `362b406`）。
+
+| kernel | SA 放置 + A* 布线 | 功能验证 |
+|---|---|---|
+| array_add | II=4 lat=11 | 387/0 |
+| array_cond | II=4 lat=13 | 243/0 |
+| trmm | II=4 lat=6 | 5/0 |
+| conv2d | II=4 lat=15 | 523/0 |
+| conv3 | II=4 lat=13 | 163/0 |
+| gemm | II=4 lat=13 | 783/0 |
+| mac | 布局合法 | 失配 |
+| mults1 | 布局合法 | 8 处失配（trace 对齐已知问题） |
+| hpcg | 布局合法 | 1 处失配（同上） |
+| gemm_pace | SA 产出 t=4，超出 II=4 的相位范围，被校验器拒绝 | — |
+
+对照 LLM 放置的同一批 kernel：只有 trmm 通过，其余倒在 `CGRATile.cpp:175` 或 mapper 断言。
+
+这是目前最硬的一组对照：**同一后端、同一 II、同一 trace，SA 放置 6/10 功能正确，LLM 放置 1/10。**
+
+两条已知边角：
+- `gemm_pace` 的 SA 不遵守 `-i 4` 的相位上界（给出 t=4）；这是 Morpher 侧的行为，校验器拦下是对的，但说明"借来的放置器"不能当作无条件正确。
+- `mac/mults1/hpcg` 的失配与 LLM 臂同源（trace 对齐），不是放置差异。
