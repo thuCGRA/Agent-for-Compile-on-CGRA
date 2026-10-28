@@ -167,3 +167,29 @@ strict 可映射 2/10、repair 可映射 7/10；**凡成功者延迟都是基线
 结论：验证器只能当**预筛**（省 mapper 时间），不能当判据；真正的判据只能是 mapper 的布线结果，加上 trace 的仿真。
 
 **下一步（待 sudo 解开 trace）**：对同一批变异跑 mapper，量"验证器拒 / mapper 也拒"的重合度，算出预筛到底省了多少时间、漏放了多少。
+
+## 14. 第一次带 trace 的功能验证（2026-10-28）
+
+`gcc-multilib` 装上后 10 个 kernel 都有了 trace（1–4 条）。用 LLM 的 repair 放置回放，`placer=fixed` 直接进 mapper，绕开静态校验，让模拟器说话：
+
+| kernel | 结果 | 证据 |
+|---|---|---|
+| trmm | **通过** | Matches 5 / Mismatches 0，15 cycles，II=4 lat=12 |
+| array_add | 失败 | `CGRATile.cpp:175` SELECT 同周期收到两个操作数，PE(1,0) cycle 14 |
+| gemm | 失败 | 同上，同一断言 |
+| conv3 | 失败 | 同上，同一断言 |
+| conv2d | 失败 | mapper `PathFinderMapper.cpp:3895` 断言（打印 bitstream 时） |
+| mac / hpcg | 失败 | mapper 路由失败，4 轮重放无解 |
+| array_cond / mults1 / gemm_pace | 未完成 | 批量跑超时或未落 sim.txt |
+
+**唯一通过的是 trmm，规模也最小（11 节点、5 个访问）。** 其余四个进入仿真的 kernel，三个倒在同一个断言上。
+
+**这个断言值得单独说。** `SELECT` 的两个操作数必须在不同周期到达同一 PE——HyCUBE 的输入寄存器一周期只能收一个。四台 kernel 全都栽在这里，且失败点高度一致（PE(1,0)、cycle 14 附近），说明这是 LLM 放置的系统性习惯：把 SELECT 的两个父节点排在相邻相位，看起来"差一拍"，但经过布线跳数之后，两个值在同一周期抵达。
+
+**静态校验看不见它。** 我对同样的 10 份 pins 跑 `validate()`：array_add / gemm / conv3 **零错误**，却全部在仿真中崩掉；反过来 array_cond / mults1 / gemm_pace 各有 1–2 条错误（重复坐标），与仿真结果也没有对应关系。
+
+原因很直接：**这个约束依赖布线距离，不依赖相位差**。两个父节点相位差 1，但一个走 1 跳、一个走 3 跳，到达时刻就相同了。放置层的静态模型根本拿不到这个量。
+
+**所以验证的层级要换。** 现在做的是"放置级静态校验"，正确的位置是"**布线后校验**"：mapper 已经写出 `routeInfo` 和每跳的延迟，用真实路径算到达周期，再判操作数互斥——这仍然是静态的（不用仿真），但必须在布线之后。这也正好解释了为什么 verify 在放置层既拦不住真错误（零漏报是假象，只是没能力报告），又误杀合法解。
+
+**下一步**：把校验器从 `validate(placement)` 改成 `validate(routes)`，读 `routeInfo.log` 的逐跳信息；先用 trmm 的通过样本和 array_add 的崩溃样本对拍，确认它能同时给出"通过/拒绝"且理由与仿真一致。
