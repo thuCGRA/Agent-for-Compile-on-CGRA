@@ -37,7 +37,8 @@ from cgra_agent.interfaces import Placement  # noqa: E402
 from cgra_agent.llm.cache import LLMCache, cache_key, prompt_sha, sha256_file  # noqa: E402
 from cgra_agent.llm.client import LLMClient, LLMError  # noqa: E402
 from cgra_agent.llm.prompts import build_messages  # noqa: E402
-from cgra_agent.placers.llm import PlacementSchemaError, extract_json_object  # noqa: E402
+from cgra_agent.placers.llm import PlacementSchemaError, extract_json_object
+from cgra_agent.tools.feasible import describe as describe_conflict, nodes_at, nodes_in_text  # noqa: E402
 from cgra_agent.tools.facts import build_facts  # noqa: E402
 from cgra_agent.tools.jobdir import JobDir  # noqa: E402
 from cgra_agent.tools.mapper import SUCCESS_RE  # noqa: E402
@@ -233,7 +234,13 @@ def main(argv=None):
             strict = mapper_run(kernel, pins, "strict", 1, ii)
             if not strict["ok"]:
                 error = strict["error"]
-                messages2 = build_messages(facts, ii, feedback=error)
+                repaired = describe_conflict(
+                    facts, ii,
+                    nodes_in_text(error) or nodes_at(error, placement),
+                    placement,
+                    header="The mapper rejected this placement: %s" % error[:400],
+                )
+                messages2 = build_messages(facts, ii, feedback=repaired or error)
                 raw2, cached2, usage2 = call_or_cache(client, cache, kernel, dfg_sha, ii,
                                                       messages2, out_dir, "call2")
                 llm_calls += 1

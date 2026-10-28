@@ -33,6 +33,7 @@ from .tools.facts import build_facts, facts_for_ii
 from .tools.jobdir import Deadline, JobDir, ToolError, tail
 from .tools.sim import run_sim
 from .tools.trace import TraceNotFound, resolve_trace
+from .tools.feasible import describe as describe_conflict, nodes_at, nodes_in_text
 from .tools.validate import format_feedback, validate
 
 # One budget, split into per-failure-type buckets (the rest is slack).  A
@@ -587,19 +588,25 @@ class Pipeline:
                 )
                 if buckets[bucket] <= BUCKET_LIMITS[bucket]:
                     if bucket == "placement":
-                        feedback = (
-                            "The mapper rejected the placement at its placement stage: %s\n"
-                            "Pins are applied one node at a time in scheduler order; a pin on a "
-                            "(PE, phase) slot that an earlier node already took is dropped and "
-                            "counts as rejected. Keep every (x,y,t) distinct and leave the "
-                            "memory PEs at x=0 for LOAD/STORE." % (out.error or "")[:500]
+                        feedback = describe_conflict(
+                            facts, ii,
+                            nodes_in_text(out.error or "") or nodes_at(out.error or "", route_placement),
+                            route_placement,
+                            header=("The mapper rejected the placement at its placement stage: %s"
+                                    % (out.error or "")[:400]),
                         )
                     else:
-                        feedback = (
-                            "The mapper accepted every pin but failed to route at II=%d: %s\n"
-                            "Routing moves one hop per cycle: shorten long edges, keep parents "
-                            "and children within 2 columns, and make the phase difference equal "
-                            "to the manhattan distance." % (ii, (out.error or "")[:500])
+                        feedback = describe_conflict(
+                            facts, ii,
+                            nodes_in_text(out.error or "") or nodes_at(out.error or "", route_placement),
+                            route_placement,
+                            header=("The mapper accepted every pin but failed to route at II=%d: %s"
+                                    % (ii, (out.error or "")[:400])),
+                        ) or (
+                            "The mapper accepted every pin but failed to route at II=%d: %s. "
+                            "Shorten long edges and keep parents and children close in the "
+                            "array; the phase difference only has to be at least the manhattan "
+                            "distance, so it may be larger." % (ii, (out.error or "")[:400])
                         )
                     continue
                 if advance_ii():
@@ -690,12 +697,19 @@ class Pipeline:
                 confidence=0.75,
             )
             if buckets["sim"] <= BUCKET_LIMITS["sim"]:
-                feedback = (
+                evidence = sim_summary.get("evidence") or ""
+                feedback = describe_conflict(
+                    facts, ii,
+                    nodes_at(evidence, route_placement) or nodes_in_text(evidence),
+                    route_placement,
+                    header=("The mapping routed and the simulator ran, but %d address(es) held "
+                            "the wrong value (%s). The node(s) below sit on the PE the simulator "
+                            "blames; a wrong value usually means their phase is off by a cycle."
+                            % (sim_summary["mismatches"], evidence)),
+                ) or (
                     "The mapping routed and the simulator ran, but %d address(es) held the "
-                    "wrong value (%s). A mismatch is almost always a phase error: a value "
-                    "arrives one or more cycles late/early. Keep the placement legal, but "
-                    "change the phases so each parent->child edge has exactly the manhattan "
-                    "distance as phase margin." % (sim_summary["mismatches"], sim_summary.get("evidence") or "")
+                    "wrong value (%s). Adjust the phases so every parent->child edge has at "
+                    "least the manhattan distance as margin." % (sim_summary["mismatches"], evidence)
                 )
                 continue
             if advance_ii():
