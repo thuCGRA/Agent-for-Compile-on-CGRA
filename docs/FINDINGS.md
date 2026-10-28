@@ -193,3 +193,23 @@ strict 可映射 2/10、repair 可映射 7/10；**凡成功者延迟都是基线
 **所以验证的层级要换。** 现在做的是"放置级静态校验"，正确的位置是"**布线后校验**"：mapper 已经写出 `routeInfo` 和每跳的延迟，用真实路径算到达周期，再判操作数互斥——这仍然是静态的（不用仿真），但必须在布线之后。这也正好解释了为什么 verify 在放置层既拦不住真错误（零漏报是假象，只是没能力报告），又误杀合法解。
 
 **下一步**：把校验器从 `validate(placement)` 改成 `validate(routes)`，读 `routeInfo.log` 的逐跳信息；先用 trmm 的通过样本和 array_add 的崩溃样本对拍，确认它能同时给出"通过/拒绝"且理由与仿真一致。
+
+## 15. 布线级校验：拿到真值，但模型还没对准
+
+用 `SIMULATOR=1` 跑崩掉的 array_add，模拟器在断言前打印了完整现场：
+
+```
+kII =14,PC =2,y=0,x=1
+NPB=0,OP=SELECT,CONSTVALID=0,CONST=0
+P=INV,I1=0,I2=1,...
+```
+
+即 PE(1,0) 在第 14 周期执行 SELECT，`I1` 与 `I2` 同时有效，触发 `CGRATile.cpp:175` 的 `!(I1isvalid && I2isvalid)`。
+
+这条规则只对 mux 类操作成立（SELECT/CMERGE 用 P 在 I1/I2 之间选），普通 ALU 两个操作数同周期到达是合法的——这正是放置级 `validate()` 看不见、也不该管的东西。
+
+`scripts/verify_routes.py` 按这个理解实现：解析 `routeInfo.log`，取每条边的终点操作数槽位与时间槽，只在 SELECT/CMERGE 上判“两操作数同槽位”。
+
+结果：array_add / gemm / conv3 都在 PE X1Y0、t=0 命中，与模拟器的 PE(1,0) 一致；**但 trmm 也被命中 2 条，而 trmm 仿真通过**。说明 `routeInfo.log` 里的 `T` 是配置槽位而不是绝对周期，且同一父边会在 WR_RI/WR_RO 多级重复出现，直接当成到达时刻会重复计数。
+
+结论：判断的**对象**找对了（SELECT 的两个操作数槽位），**时间轴**还没对准。下一步不再从 `routeInfo` 反推，而是直接用模拟器的逐周期打印标定到达时刻，再回到静态侧拟合。
