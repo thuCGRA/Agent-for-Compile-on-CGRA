@@ -324,3 +324,28 @@ array_add 的结果：
 4. SA 放置 + PathFinder 是目前最好的组合（10 个 kernel 里 6 个功能通过）。
 
 **这四条合起来指向一个结论：在 4x4 HyCUBE、II 固定的条件下，agent 层能优化的空间不在"给 mapper 出主意"，而在"选哪个架构/哪个 DFG 交给 mapper"。** 下一步应该去做架构参数（阵列尺寸）与 DFG 变换的扫描，那里 II 会真的变。
+
+## 20. 架构尺寸是第一个真正有 tradeoff 的维度
+
+补上了 `src/cgra_agent/tools/arch.py`（从已知可用的 4x4 ADL 派生 NxN 变体：改 `DIMS`、筛 `MODS`、丢掉会触发 `dest_mod` 断言的 `CGRA.CONNECTIONS`；bank 数不主动改，因为一个 `SPM_B` 由 GRID 模式绑到一行 PE_MEM，网格缩到装不下就直接报错而不是产生错架构）。
+
+`scripts/exp_arch_sweep.py`：PathFinder 解出放置 → `--dump-placement` → 回灌 method 3 拿 bitstream → 仿真。
+
+| kernel | 4x4 | 3x3 | 2x2 |
+|---|---|---|---|
+| array_add | II=4 lat=11 **134 cycles** 387/0 | II=4 lat=11 **133 cycles** 387/0 | II=5 lat=19 **164 cycles** 387/0 |
+| trmm | II=4 lat=6 **9 cycles** 5/0 | II=4 lat=6 **9 cycles** 5/0 | — |
+
+三点：
+
+1. **3x3 严格支配 4x4**：周期数相同（133 vs 134，差 1 个周期是测量噪声级），PE 从 16 降到 9。
+2. 2x2 才出现代价：II 从 4 涨到 5、lat 11→19、周期 +22%，但 PE 只剩 4 个。
+3. conv3 两个尺寸都 `sim-skipped`（`work/traces/conv3` 没有 trace）。
+
+### 这意味着什么
+
+前四轮实验（全量 pin、弱 pin、bank 分配）都是平空间，因为 II 由 DFG 结构决定、而 4x4 对这些 kernel 是**过配**的。架构尺寸是第一个真正改变结果的地方：3x3 用一半的 PE 拿到同样的性能。
+
+这就是 LLM 该介入的位置——不是给 mapper 指定位置，而是在"这个 kernel 需要多大阵列"上做判断，判据是 facts 里的节点数、算子构成、ResMII 和 bank 访问模式。而验证它是廉价的：仿真一次就能证伪。
+
+下一步：把 10 个 kernel × {4x4, 3x3, 2x2} 扫完，做出面积-周期的 Pareto 前沿；再让 LLM 只看 facts 选尺寸，与穷举结果比对。
