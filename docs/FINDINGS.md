@@ -463,3 +463,31 @@ array_add 的周期数（134）与 A* 基线完全一致，延迟还比 LLM 自�
 **已核对的错误假设**：`(t_c - t_p - ni*II) mod II >= lat_p` 在 mapper 自己的放置上违例 20/23、28/31；`t ≡ DFG 层数 mod II` 也不成立（差值分布 0/1/2/3 都有）。t 的语义必须从 mapper 源码读出来，不能靠猜。
 
 **下一步（不需决策）**：读 `Morpher_CGRA_Mapper` 的调度代码，导出真实的 modulo-time 约束，重写 `legalize`，并用"mapper 自己的解放进去必须可调度"作为回归测试，再重跑 E1/E2。
+
+## 22. 把相位从模型手里拿走：7/10 直接可映射（2026-10-29）
+
+读 mapper 源码后确认：`PathFinderMapper::estimateRouting` 里有
+`assert((minLatDestVal) % t_max == destPort->getPE()->T)`——相位是 mapper 自己的调度结果，pin 里强制 `t` 等于替它做调度。
+
+为此把 `LLMMapper` 的 pin 放宽为**只约束 (x,y)，`t=-1` 表示相位自由**（`t<0` 时过滤条件只看坐标）。改的是我们自己的 patch，不动 PathFinder 的布线逻辑。
+
+用 `work/eval-llm2/*/strict/pins.json` 里**同一批 LLM 空间放置**，只把 `t` 改成 -1，重跑 II=4：
+
+| kernel | 全 pin (x,y,t) | 只 pin (x,y) | lat | 基线 lat |
+|---|---|---|---|---|
+| array_add | strict 失败 / repair 21 | **ok** | 10 | 11 |
+| array_cond | 失败 | **ok** | 17 | 13 |
+| conv2d | 失败 | **ok** | 25 | 13 |
+| gemm | 失败 | **ok** | 17 | 12 |
+| hpcg | 失败 | **ok** | 12 | 11 |
+| mac | 失败 | **ok** | 11 | — |
+| trmm | ok(全 pin 也 ok) | **ok** | 7 | 12 |
+| conv3 | 失败 | 失败 (CMERGE@x=1) | — | 12 |
+| mults1 | 失败 | 失败 (CMERGE@x=2) | — | — |
+| gemm_pace | 失败 | 失败 (SELECT@x=1) | — | — |
+
+**这是整个项目里第一个正面结果**：同一份 LLM 输出，仅因为不再替编译器决定相位，可映射数从 2/10 变成 7/10；array_add 与 trmm 的 lat 还优于基线。
+
+**教训**：之前把"strict 失败"归因于"模型不会调度/约束没进 prompt"，是错的；真正的阻塞是接口把 `t` 也钉死了。这已经是本项目第三次"用猜的语义判工具"（前两次：相位差≥曼哈顿、legalize 的时序模型）。
+
+**待办**：conv3/mults1/gemm_pace 的失败点是伪节点 CMERGE、SELECT 被 LLM 放到 x≠0；下一步确认这些 op 的合法列，并在 `feasible.py` 里作为生成时的硬约束。
