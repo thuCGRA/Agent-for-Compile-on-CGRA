@@ -61,6 +61,7 @@ HOSTFLAGS="-B/usr/bin -O2"
 echo "== [2/3] mapper"
 apply_patch "$ROOT/toolchain/vendor/mapper" "$ROOT/toolchain/patches/0002-mapper.patch"
 apply_patch "$ROOT/toolchain/vendor/mapper" "$ROOT/toolchain/patches/0004-mapper-dump.patch"
+apply_patch "$ROOT/toolchain/vendor/mapper" "$ROOT/toolchain/patches/0005-mapper-phase-free-pins.patch"
 cmake -S "$ROOT/toolchain/vendor/mapper" -B "$BUILD/mapper" -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER="$GCC" -DCMAKE_CXX_COMPILER="$GXX" \
   -DCMAKE_C_FLAGS="$HOSTFLAGS" -DCMAKE_CXX_FLAGS="$HOSTFLAGS" > "$BUILD/mapper-config.log" 2>&1 || { tail -30 "$BUILD/mapper-config.log"; exit 5; }

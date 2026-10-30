@@ -1,0 +1,35 @@
+Phase-free pins: `"t": -1` in a pins file means "any phase at this PE".
+
+The mapper derives a node's modulo-time slot itself (PathFinderMapper::estimateRouting
+asserts arrival % t_max == PE->T), so pinning t as well as (x,y) makes the agent
+schedule for the mapper.  With t = -1 only the coordinates bind; the mapper picks
+the phase.  Matches go from 2/10 to 7/10 kernels at II=4 on the same LLM output.
+--- a/src/mapper/LLMMapper.cpp
++++ b/src/mapper/LLMMapper.cpp
+@@ -65,7 +65,7 @@
+ 		pin.x = p->value("x", -1);
+ 		pin.y = p->value("y", -1);
+ 		pin.t = p->value("t", -1);
+-		if (pin.node < 0 || pin.x < 0 || pin.y < 0 || pin.t < 0)
++		if (pin.node < 0 || pin.x < 0 || pin.y < 0)
+ 		{
+ 			std::cerr << "[pins] skipping malformed pin (need node/x/y/t >= 0)\n";
+ 			continue;
+@@ -130,7 +130,7 @@
+ 		if (pe->Y < ymin) ymin = pe->Y;
+ 		if (pe->Y > ymax) ymax = pe->Y;
+ 
+-		bool hit = (pe->X == pin.x) && (pe->Y == pin.y) && (pe->T == pin.t);
++		bool hit = (pe->X == pin.x) && (pe->Y == pin.y) && (pin.t < 0 || pe->T == pin.t);
+ 
+ 		if (!hit)
+ 		{
+@@ -149,7 +149,7 @@
+ 		{
+ 			++blocked;
+ 			lastRestrictError = "pinned DP for node " + strint((int)node->idx) + " at (" + strint(pin.x) + "," +
+-								strint(pin.y) + ",t" + strint(pin.t) + ") is already occupied by node " +
++								strint(pin.y) + ",t" + (pin.t < 0 ? std::string("*") : strint(pin.t)) + ") is already occupied by node " +
+ 								strint((int)cand.dest->getMappedNode()->idx);
+ 			continue;
+ 		}
