@@ -491,3 +491,25 @@ array_add 的周期数（134）与 A* 基线完全一致，延迟还比 LLM 自�
 **教训**：之前把"strict 失败"归因于"模型不会调度/约束没进 prompt"，是错的；真正的阻塞是接口把 `t` 也钉死了。这已经是本项目第三次"用猜的语义判工具"（前两次：相位差≥曼哈顿、legalize 的时序模型）。
 
 **待办**：conv3/mults1/gemm_pace 的失败点是伪节点 CMERGE、SELECT 被 LLM 放到 x≠0；下一步确认这些 op 的合法列，并在 `feasible.py` 里作为生成时的硬约束。
+
+## 23. SA / LISA 实测与基线更正（2026-10-30）
+
+同一份 `work/kernels/*/mem.json`、II=4、10 个 kernel，直接跑 `-m 0/1/2`：
+
+| kernel | `-m 0` PathFinder | `-m 1` SA | `-m 2` LISA |
+|---|---|---|---|
+| array_add | 4/11, 1.3s | 4/11, 1.4s | 断言 |
+| array_cond | 4/13, 2.1s | 4/13, 2.1s | 断言 |
+| conv2d | 4/15, 2.8s | 4/15, 2.9s | 断言 |
+| conv3 | 4/13, 2.1s | 4/13, 1.9s | 断言 |
+| gemm | 4/13, 4.0s | 4/13, 4.3s | 断言 |
+| gemm_pace | 9/13, 15.4s | 9/13, 83.7s | 断言 |
+| hpcg | 4/11, 128.2s | 4/11, 56.6s | 断言 |
+| mac | 4/10, 21.8s | 4/10, 18.3s | 断言 |
+| mults1 | 4/16, 55.1s | 4/16, 18.3s | 断言 |
+| trmm | 4/6, 2.8s | 4/6, 90.7s | 断言 |
+
+- **SA 与 PathFinder 的 II/lat 逐项相同**，只差耗时（trmm 2.8→90.7s，gemm_pace 15.4→83.7s）。它优化的是自己的代价函数，不是 lat。
+- **LISA 不可用**：10/10 触发 `Assertion 'arg.lisa_arg.arch_name != ""'`，需要 `--arch_name` 与训练好的 GNN 模型，仓库里没有训练产物。
+
+**基线更正**：`-m 0` 的真实 lat 是 trmm 6、mac 10、conv2d 15、gemm 13、array_cond 13、hpcg 11、array_add 11、mults1 16。据此重看 §22：spatial-only pin 只在 array_add 上更好（10 vs 11），trmm 的 7 实际比基线 6 差。§22 里"trmm 优于基线"的表述作废。

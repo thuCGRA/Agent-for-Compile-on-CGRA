@@ -54,3 +54,23 @@
  work/kernels/array_add/dfg.xml method:SA_pf 4 0
  work/kernels/array_add/dfg.xml method:LLM 4 7
  work/kernels/array_add/dfg.xml method:LLM 4 2
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_add/dfg.xml method:PathFinder 4 0
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_add/dfg.xml method:SA_pf 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_cond/dfg.xml method:PathFinder 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/array_cond/dfg.xml method:SA_pf 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv2d/dfg.xml method:PathFinder 4 2
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv2d/dfg.xml method:SA_pf 4 2
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv3/dfg.xml method:PathFinder 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/conv3/dfg.xml method:SA_pf 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm/dfg.xml method:PathFinder 4 3
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm/dfg.xml method:SA_pf 4 3
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm_pace/dfg.xml method:PathFinder 9 16
+ /home/steve/CGRA_Agent_Compiler/work/kernels/gemm_pace/dfg.xml method:SA_pf 9 33
+ /home/steve/CGRA_Agent_Compiler/work/kernels/hpcg/dfg.xml method:PathFinder 4 126
+ /home/steve/CGRA_Agent_Compiler/work/kernels/hpcg/dfg.xml method:SA_pf 4 47
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mac/dfg.xml method:PathFinder 4 19
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mac/dfg.xml method:SA_pf 4 16
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mults1/dfg.xml method:PathFinder 4 52
+ /home/steve/CGRA_Agent_Compiler/work/kernels/mults1/dfg.xml method:SA_pf 4 16
+ /home/steve/CGRA_Agent_Compiler/work/kernels/trmm/dfg.xml method:PathFinder 4 1
+ /home/steve/CGRA_Agent_Compiler/work/kernels/trmm/dfg.xml method:SA_pf 4 14

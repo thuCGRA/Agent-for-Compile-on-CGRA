@@ -638,9 +638,8 @@
                 "SPM0.PORT1": "THIS.MEMPORT_P1"
             },
             "DATA_LAYOUT": {
-                "A": 128,
-                "C": 0,
-                "loopend": 2047
+                "loopend": 2047,
+                "manupa4": 0
             },
             "INIT_FILE": "../json/test_data.json",
             "ISOCKETS": null,
@@ -663,7 +662,6 @@
                 "SPM0.PORT1": "THIS.MEMPORT_P1"
             },
             "DATA_LAYOUT": {
-                "B": 2048,
                 "loopstart": 4094
             },
             "INIT_FILE": "../json/test_data.json",
