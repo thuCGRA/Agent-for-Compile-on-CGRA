@@ -79,6 +79,20 @@ grep -rn "mapping_method == 3\|--morpher_light" src/mapper/src/  # 空
 | `toolchain/patches/` | 全部上游改动，可审可复现 |
 | `docs/` | 四篇说明 |
 
+## 四之二、构建产物指纹
+
+同一套源码在不同机器/不同时间编译，二进制哈希可能与下面不同（编译器版本、路径会进二进制），
+但**同一个 conda 环境下应当稳定**。本机（`sutong_103`，conda `cgra-tc`：LLVM 10.0.1 / GCC 7.5.0）
+从零编译两次的结果：
+
+| 产物 | sha256 |
+|---|---|
+| `out/libdfggenPass.so` | `57e4462f4c06be93e43b12655e8f0dcf4399e84ac86f262a38204df67f7c663c` |
+| `out/cgra_xml_mapper` | `2144c0f6eb29142f7d89b894c0e6f9ee7b37cd9a38ef4edbac5ff4feccd1ac77` |
+| `out/hycube_simulator` | `449ac2484a5769b8a41645d8e41604600032dbf78af9c9b0e8e2c02fb735a951` |
+
+`build.sh` 会把当前这三个哈希写进 `out/SHA256SUMS`，可用于对比。
+
 ## 五、没用上游的什么（重要）
 
 上游的 `run_morpher.py`（约 400 行）负责把五个阶段串起来，本工程**完全没有复用它**，原因是：
