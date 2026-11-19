@@ -81,9 +81,7 @@ grep -rn "mapping_method == 3\|--morpher_light" src/mapper/src/  # 空
 
 ## 四之二、构建产物指纹
 
-同一套源码在不同机器/不同时间编译，二进制哈希可能与下面不同（编译器版本、路径会进二进制），
-但**同一个 conda 环境下应当稳定**。本机（`sutong_103`，conda `cgra-tc`：LLVM 10.0.1 / GCC 7.5.0）
-从零编译两次的结果：
+在 `/home/sutong/acc-thu` 里从零编译两次，结果完全一致（conda `cgra-tc`：LLVM 10.0.1 / GCC 7.5.0）：
 
 | 产物 | sha256 |
 |---|---|
@@ -91,7 +89,13 @@ grep -rn "mapping_method == 3\|--morpher_light" src/mapper/src/  # 空
 | `out/cgra_xml_mapper` | `2144c0f6eb29142f7d89b894c0e6f9ee7b37cd9a38ef4edbac5ff4feccd1ac77` |
 | `out/hycube_simulator` | `449ac2484a5769b8a41645d8e41604600032dbf78af9c9b0e8e2c02fb735a951` |
 
-`build.sh` 会把当前这三个哈希写进 `out/SHA256SUMS`，可用于对比。
+**但换一个目录编译，哈希就会变**（已实测：把同一棵树复制到 `/tmp/acc-clean` 编译得到
+`libdfggenPass.so` = `6daabe55…`、`cgra_xml_mapper` = `f3b3f42c…`、`hycube_simulator` = `58483fee…`）。
+原因是 mapper 与 simulator 用 Debug 构建，DWARF 里记录了源码绝对路径。
+所以这些哈希只能用于**同一目录下的前后对比**（比如确认"我没改代码但重编了一次"），
+不能当跨机器的内容指纹；跨机器要用 `git rev-parse HEAD` + `scripts/run_all.sh` 是否全 PASS 来判断。
+
+`build.sh` 会把当前三个哈希写进 `out/SHA256SUMS`。
 
 ## 五、没用上游的什么（重要）
 
