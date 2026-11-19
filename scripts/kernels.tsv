@@ -1,0 +1,5 @@
+# kernel<TAB>进入 DFG 的函数名
+# 注意：mac.c 的循环在 main() 里（没有独立函数），所以 -fn main
+array_add	array_add
+mac	main
+trmm	trmm

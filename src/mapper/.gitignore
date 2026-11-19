@@ -1,0 +1,10 @@
+/Debug/
+/Release/
+*.log
+*.csv
+*jsonmapping_i.txt
+*verbose.json
+applications/**/*.txt
+applications/**/*.info
+applications/**/*.json
+*.output

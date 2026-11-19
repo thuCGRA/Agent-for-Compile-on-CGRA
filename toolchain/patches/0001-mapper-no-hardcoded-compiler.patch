@@ -1,0 +1,14 @@
+上游 Morpher_CGRA_Mapper/src/CMakeLists.txt 把编译器硬编码成 gcc-7 / /usr/bin/g++-7。
+不装系统 gcc-7 的机器上直接编译失败（/bin/sh: /usr/bin/g++-7: 没有那个文件或目录）。
+这里注释掉，改由 CMake 命令行 -DCMAKE_C_COMPILER / -DCMAKE_CXX_COMPILER 指定
+（必须用 conda 环境里的 GCC 7.5，原因见 scripts/build.sh 顶部注释）。
+
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1,2 +1,4 @@
+-set(CMAKE_C_COMPILER "gcc-7")
+-set(CMAKE_CXX_COMPILER "/usr/bin/g++-7")
++# 上游硬编码 gcc-7 / /usr/bin/g++-7；改由 -DCMAKE_C(XX)_COMPILER 指定
++# （必须是 GCC 7.5：GCC 13 编出来解析 ADL JSON 会 latent UB → SIGSEGV）
++# set(CMAKE_C_COMPILER "gcc-7")
++# set(CMAKE_CXX_COMPILER "/usr/bin/g++-7")
