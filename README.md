@@ -85,6 +85,8 @@ acc-thu/
 | simulator | conda GCC | 7.5.0 | 同上；且必须保留 `assert`（Release 的 `-DNDEBUG` 会删掉带副作用的断言 → 死循环）|
 
 `build.sh` 顶部有一段注释解释每个选择的来历，改动前先读它。
+整套环境可以用 `conda env create -f toolchain/environment.yml` 复现（name 为 `cgra-tc`）。
+生成 trace 还需要系统装 32 位 glibc 头：`sudo apt-get install -y gcc-multilib libc6-dev-i386`。
 
 ## 已知限制
 

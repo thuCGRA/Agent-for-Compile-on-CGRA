@@ -1,0 +1,28 @@
+# acc-thu 的编译环境（conda）
+#
+# 创建：
+#   conda env create -f toolchain/environment.yml
+#   conda activate cgra-tc
+#   bash scripts/build.sh
+#
+# 这三个组件对编译器版本敏感，锁定版本不是洁癖：
+#   - clang/llvmdev/llvm-tools 必须 10.0.1 且三者同版本：LLVM pass 与 opt 必须同一 LLVM
+#   - gcc/gxx 必须 7.x：GCC 13 编出来的 mapper 在解析 ADL 时会踩 latent UB（SIGSEGV/SIGILL）
+#   - cmake >= 3.20：上游 CMakeLists 用了较新的 target 语法
+# 上游 morpher 的 Dockerfile 用的是 ubuntu18.04 + gcc7.5，与此等价。
+name: cgra-tc
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - clang=10.0.1
+  - llvmdev=10.0.1
+  - llvm-tools=10.0.1
+  - gcc_linux-64=7.5.0
+  - gxx_linux-64=7.5.0
+  - binutils_linux-64
+  - sysroot_linux-64
+  - cmake>=3.20
+  - make
+  # 生成 trace 时要 host 编 instrumentation.cpp，需要系统 gcc（见 docs/02-dfg.md §4）
+  # 以及 32 位 glibc 头：sudo apt-get install -y gcc-multilib libc6-dev-i386
