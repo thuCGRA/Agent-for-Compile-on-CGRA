@@ -1,117 +1,120 @@
 # acc-thu / evo：用伐谋（Famou 2.0）演化 CGRA 映射算法
 #
 # 用法（在 ~/acc-thu 下）：
-#   ~/miniconda3/envs/famou/bin/python ~/famou-v2/run_famou.py \
-#       -c evo/config.yaml -p evo/init.py -e evo/evaluator.py
+#   bash evo/run.sh                     # 用 evo/config.yaml（从本文件生成）
+#   bash evo/run.sh --regen             # 重新从本文件生成 config.yaml
+#   bash evo/run.sh -r famou_data/<exp> # 恢复已有实验
 #
-# 与 examples/circle_packing 的区别：这里的适应度不是浮点误差，而是
-# "一份放置能不能在 4x4 HyCUBE 上合法且少绕路"，评一次约 50 ms（纯 Python）。
+# 与本文件配套的 evaluator 会真的调 morpher 的 mapper 和仿真器，一次评测
+# 约 10-30 秒（不是 50 毫秒）。所以 max_iterations 别开太大。
 
 experiment:
   name: cgra_mapper_evolution
   task_description: |
-    # CGRA 映射算法的演化任务
+    # CGRA 映射算法的演化任务：空间放置
 
     ## 背景
-    我们要为一个 4x4 的 CGRA（HyCUBE 结构）写映射器。输入是一个数据流图（DFG）——
-    编译器前端（LLVM pass）把 C 循环体变成了若干算子和它们之间的依赖边。
-    你的任务是写一个函数，决定**每个算子放在哪个 PE 上、在什么相位执行**。
+    我们要为一个 4x4 的 CGRA（HyCUBE 结构）写映射器的**放置部分**。输入是一个
+    数据流图（DFG）——编译器前端（LLVM pass）把 C 循环体变成了若干算子和依赖边。
+    你的任务是写一个函数，决定**每个算子放在哪个 PE 上**。
 
-    硬件结构：
+    **相位不归你管**。这是本任务与常见"调度+放置"任务最重要的区别：
+    morpher 的 mapper 自己推导相位，它在 estimateRouting 里断言
+    `minLatDestVal % t_max == destPE->T`，也就是"数据什么时候到达，PE 就在那一拍
+    执行"。相位由数据到达时间决定，不是你输入的东西。实测：硬钉相位
+    `(x, y, t)` 时三个内核全被拒（3/3 失败）；只钉 `(x, y)` 时两个通过。
+    所以**你只决定空间，时间交给 mapper**。
+
+    ## 硬件结构
     - 阵列 4x4 = 16 个 PE，坐标 (x, y)，x 从 0 到 3，y 从 0 到 3。
     - **x=0 那一列的 4 个 PE 是 PE_MEM**（访存 PE），它们连着片上存储（SPM）。
     - x=1..3 的 12 个 PE 是算术 PE（ALU）。
-      注意：ALU 和 PE_MEM **都能做算术**（ADD/MUL/SELECT/CMERGE/OSTORE 两边都有），
+      ALU 和 PE_MEM **都能做算术**（ADD/MUL/SELECT/CMERGE/OSTORE 两边都有），
       只有 7 个纯访存算子（LOAD/LOADB/LOADCL/LOADH/STORE/STOREB/STOREH）
-      必须落在 PE_MEM 上。落在 PE_MEM 上的算子延迟是 2，落在 ALU 上是 1。
+      必须落在 PE_MEM 上。
     - 相邻 PE 之间有四个方向的连线（N/E/S/W），一次传输走一条边算 1 跳。
-    - **每条链路（同一个方向、同一对 PE）在每个相位只能过一个值。**
-    - 每个 PE 每个相位只能执行 1 个算子。
-    - 相位是模 II 的：PE 在周期 c 执行，等价于在周期 c+II、c+2II……执行。
+    - **每条链路（同一方向、同一对 PE）在每个相位只能过一个值。**
+    - 每个 PE 每个相位只能执行 1 个算子，所以一块 PE 上最多放 `ii` 个节点。
+    - SPM 分成若干 bank，每个 bank 只连到**特定的几块** PE_MEM（见 `bank_pes`）。
+      访存算子带的变量在哪个 bank，它就必须落在那个 bank 连得到的 PE_MEM 上，
+      否则 mapper 直接判无解。
 
     ## 你要实现的接口
     ```python
     def place(prob, ii):
-        '''返回 {node_idx: (x, y, t)}，t 是相位 0..ii-1'''
+        '''返回 {node_idx: (x, y)}'''
     ```
     `prob` 是一个 dict，字段如下（全部是内建类型，可直接 pickle）：
 
     | 键 | 含义 |
     |---|---|
     | `kernel` | 内核名（字符串，仅供调试） |
-    | `ii` | 本次要求的启动间隔（与参数 `ii` 相同） |
-    | `tight`, `loose` | 两个评测档的 II（见下面"打分"） |
-    | `rec_min_ii` | 该 kernel 的递推最小 II（循环携带依赖决定的下界） |
+    | `ii` | 启动间隔（三个 kernel 的递推下界都是 4） |
+    | `rec_min_ii` | 循环携带依赖决定的下界，等于本次的 `ii` |
     | `xdim`, `ydim` | 阵列尺寸，这里是 4 和 4 |
     | `pe_mem` | 访存 PE 的坐标列表，如 `[[0,0],[0,1],[0,2],[0,3]]` |
     | `pe_alu` | 算术 PE 的坐标列表（12 个） |
     | `nodes` | 节点列表，每个是 `{"idx","op","parents","children","const","var","is_mem","lat"}` |
     | `edges` | 边列表，每个是 `[parent_idx, child_idx, nextiter]` |
-    | `alu_ops`, `mem_ops` | 算子名 → 延迟 |
-    | `alu_lat_map`, `mem_lat_map` | 同上，逐算子查表用 |
-    | `var_bank` | 变量名 → bank 编号（`is_mem` 节点的 `var` 落在这个 bank 上） |
+    | `alu_ops`, `mem_ops` | 算子名 → 延迟（同一个算子在两类 PE 上延迟不同） |
+    | `var_bank` | 变量名 → bank 编号 |
     | `bank_vars` | bank 编号 → 该 bank 里的变量名 |
+    | `bank_pes` | bank 编号 → 该 bank 连得到的 PE_MEM 坐标列表 |
+    | `bank_pes_known` | `bank_pes` 是否可信（True 时它是要遵守的硬约束） |
     | `n_nodes`, `op_hist`, `res_min_ii` | 规模与算子直方图，资源下界 |
 
-    ## 硬约束（违反任意一条，该内核在那一档得 0 分）
+    ## 硬约束（违反任意一条，该内核得 0 分）
     1. 每个节点恰好一个位置，不能漏也不能重复；
-    2. 同一个 `(x, y, t)` 不能放两个节点；
-    3. `0 <= x < xdim`，`0 <= y < ydim`，`0 <= t < ii`；
-    4. 算子必须出现在它所在的 PE 类型的算子表里；
-    5. `ii >= rec_min_ii`（否则循环携带依赖在原理上就排不开）；
-    6. SELECT / CMERGE 有两个操作数，它们的两个父边必须落在**不同**的相位上
-       （一个在 `t`，另一个在 `t-1`），否则功能单元拿不到两个操作数；
-    7. **所有边都要真的能布出来**（见下）。
+    2. `0 <= x < xdim`，`0 <= y < ydim`；
+    3. 算子必须出现在它所在 PE 类型的算子表里（纯访存算子只能在 PE_MEM 上）；
+    4. 访存算子带的变量所在 bank 必须能连到它落的那块 PE_MEM（看 `bank_pes`）；
+    5. 同一块 PE 上最多放 `ii` 个节点。
 
-    ## 相位、跳数与布线
-    一条边 `p -> c` 的跳数 `h` 必须满足
-    ```
-    h ≡ (t_c - t_p - lat_p)  (mod ii),        h >= |x_p-x_c| + |y_p-y_c|
-    ```
-    也就是：父节点在第 `t_p` 拍算出结果，经过 `lat_p` 拍延迟和 `h` 跳传输，
-    要在子节点执行的那一拍（SELECT 的第二个操作数在 `t_c-1` 那一拍）到达。
-    传输过程中可以在某个 PE 的寄存器里**原地等若干拍**，等拍不占链路。
+    这五条只是**入场券**。真正的判据是下面两关。
 
-    光满足同余式不够：**每条链路在每个相位只能过一个值**。所有边的路径要能同时
-    排进这个时间扩展图里。多出来的跳数 `h - 曼哈顿距离` 叫绕路，越少越好。
+    ## 打分：真 mapper + 真仿真器
+    你的放置会被钉进 morpher 的 mapper（`-m 3 --pins_mode 1`，strict），
+    mapper 自己排相位、自己布线、自己出 bitstream；然后跑周期精确仿真器，
+    比对内存快照。
 
-    ## 打分
-    每个内核在两档 II 上评测：紧档 `tight = rec_min_ii`（三个 kernel 都是 4），
-    松档 `loose = tight + 1`。
     ```
-    per_kernel = 0.85 / (1 + detour_at_tight / 20)   # 仅当紧档"合法且可布"
-               + 0.15                                # 仅当松档也合法
-    combined_score = mean(per_kernel over 3 kernels)
-    validity       = 紧档可布的内核数 / 3
+    该内核得 0.00                             # 没通过上面五条硬约束
+    该内核得 0.15                             # mapper 布通，但仿真失配
+    该内核得 0.15 + 0.85 / (1 + lat / 40)      # 布通且仿真零失配，lat 越小越高
+    combined_score = 三个内核的平均
+    validity       = 仿真零失配的内核数 / 3
     ```
-    `detour_at_tight` 是紧档下所有边绕路跳数之和（真实布线算出来的）。
-    上界 1.0；我们的贪心基线是 0.399（array_add 在 II=4 布不出来）。
-    所以**先让它处处可布**（validity 从 0.667 提到 1.0），再压绕路。
+    mapper 单次有 **20 秒预算**：好的放置 3-4 秒就出结果，坏的放置会算到超时
+    （实测一次坏放置烧了 164 秒才放弃）。超时按"没布通"处理。
+
+    当前基线（`evo/init.py`）：combined = 0.564，validity = 0.667 ——
+    array_add 与 trmm 布通且仿真通过（lat 12 / 6），mac 超时。
+    所以第一步的目标很明确：**让 mac 也能布通并仿真通过**（validity 1.0），
+    然后再压 lat。
 
     ## 优化建议
     - 有依赖的节点尽量放相邻（曼哈顿距离小），依赖链沿一行或一列铺开；
-    - 访存节点按 `var_bank` 放到对应 bank 那一行的 PE_MEM 上（`bank 0` → y=0 行等），
-      这样访存边不会横跨整列；
-    - 相位是模 II 的，`t` 只在 `[0, ii)` 里，不要试图用大 t 去躲冲突；
-    - SELECT/CMERGE 的两个父节点相位要错开 1，这通常需要让两个父节点距离不同
-      或者 `t` 不同；
-    - 别让太多边挤同一对相邻 PE 的同一个相位——那是链路冲突的来源；
-    - array_add 只有 20 个节点却布不出来，通常是因为局部太挤，
-      把节点摊开（宁可绕路多一点）反而能过。
+    - 访存节点按 `bank_pes` 放到对应 bank 连得到的 PE_MEM 上，别只看行号；
+    - 一块 PE 上塞太多节点会让 mapper 的相位搜索爆炸（这正是 mac 超时的原因），
+      摊开到更多 PE 上通常更快布通；
+    - SELECT/CMERGE 有两个操作数，它们的两个父节点最好放在离它 1-2 跳的地方，
+      让 mapper 有错开一拍的余地；
+    - 别让太多边挤同一对相邻 PE——链路每相位只过一个值；
+    - 三个内核必须都成立，不要针对某一个特化。
 
     ## 三个评测内核
     `array_add`（20 节点，访存密集）、`mac`（22 节点，含 SELECT 归约）、
-    `trmm`（11 节点，含 OLOAD/OSTORE）。程序必须对三者都成立，不要针对某一个特化。
+    `trmm`（11 节点，含 OLOAD/OSTORE）。
 
   language: python
   strategy: greedy
   max_iterations: 4
-  max_workers: 3
+  max_workers: 2
   checkpoint_interval: 5
   seed: 42
 
   island:
-    num_islands: 4
+    num_islands: 2
     island_size: 50
     migration_interval: 10
     migration_size: 2
@@ -121,7 +124,7 @@ experiment:
 
   debug:
     enabled: true
-    max_iterations: 2
+    max_iterations: 4
 
 infrastructure:
   llm:
@@ -145,7 +148,7 @@ infrastructure:
 
   env:
     type: local
-    timeout: 300
+    timeout: 600
 
   monitor:
     enabled: false

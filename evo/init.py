@@ -1,19 +1,24 @@
 # EVOLVE-BLOCK-START
-"""CGRA 映射器的空间放置 + 相位指派（演化主体）。
+"""CGRA 映射器的**空间放置**（演化主体）。
 
 接口（必须保持）：
-    place(prob, ii) -> {node_idx: (x, y, t)}
+    place(prob, ii) -> {node_idx: (x, y)}
 
-约束（check.py 会逐条检查，违反即 0 分）：
-  * 每个节点恰好一个位置；同一 (x, y, t) 不能放两个节点；
-  * 访存算子（LOAD/STORE 等）只能落在 PE_MEM 上，算术算子不能落在 PE_MEM 上；
-  * 0 <= x < xdim, 0 <= y < ydim, 0 <= t < ii；
-  * SELECT/CMERGE 的两个父节点不能在同一拍到达。
+只决定每个算子落在哪个 PE 上，**相位由 morpher 自己算**。原因是相位不是
+输入：PathFinderMapper::estimateRouting 里断言
+    minLatDestVal % t_max == destPE->T
+也就是"数据什么时候到达，PE 就在那一拍执行"。硬钉相位会让绝大多数放置
+不可行（三个 kernel 上 strict 钉 (x,y,t) 被拒 3/3，只钉 (x,y) 通过 2/3）。
 
-分数：合法之后按"绕路跳数"打折。绕路 = 实际跳数 - 曼哈顿距离。
-所以目标很直接：让有依赖的节点在阵列上彼此靠近，并且尽量少撞相位槽位。
+约束（check.py 逐条检查，违反即 0 分）：
+  * 每个节点恰好一个位置；0 <= x < xdim，0 <= y < ydim；
+  * LOAD/STORE 这类只存在于 FU_MEM 的算子必须落在 PE_MEM（x=0 那一列）；
+  * 访存算子带的变量所在 bank 必须能连到它落的那块 PE_MEM；
+  * 同一块 PE 最多放 ii 个节点（它有 ii 个相位槽位）。
+
+分数：先要真 mapper 布通（0.15），再要真仿真零失配（0.85 按 lat 打折）。
+所以目标是：让依赖密集的算子靠近、访存算子落到对的 bank、别把 PE 挤爆。
 """
-
 
 def _topo(prob):
     """拓扑序；遇到环（跨迭代边）时把剩下的节点按 idx 追加。"""
@@ -37,7 +42,6 @@ def _topo(prob):
     order.extend(sorted(i for i in nodes if i not in seen))
     return order, nodes
 
-
 def _depth(prob, order, nodes):
     """每个节点的最长跳数（从源点算），用来决定放在第几列。"""
     depth = {i: 0 for i in nodes}
@@ -47,86 +51,45 @@ def _depth(prob, order, nodes):
                 depth[ch] = max(depth[ch], depth[idx] + 1)
     return depth
 
-
-def _assign_units(prob, order, nodes, depth):
-    """给每个节点挑一个 (x, y)。访存算子固定在 x=0 那一列。"""
+def place(prob, ii):
+    """按 bank 定行、按深度定列，每块 PE 最多放 ii 个节点。"""
+    order, nodes = _topo(prob)
+    depth = _depth(prob, order, nodes)
     xdim, ydim = prob["xdim"], prob["ydim"]
     pe_mem = [tuple(p) for p in prob["pe_mem"]]
     pe_alu = [tuple(p) for p in prob["pe_alu"]]
     var_bank = prob.get("var_bank") or {}
 
-    # 每个 bank 占一行（acc-thu 的约定：SPM_B<i> 由第 i 行的 PE_MEM 独占）
-    mem_rows = {}
-    for (x, y) in sorted(pe_mem):
-        mem_rows.setdefault(y, []).append((x, y))
+    # bank -> 可达的 PE_MEM 坐标，必须从 CGRA.CONNECTIONS 读：arch.json 里
+    # SPM_B0 连 y=0,1，SPM_B1 连 y=2,3。按行号猜会让一半访存算子落到错的
+    # bank 上，morpher 在 estimateRouting 直接拒（候选集为空）。
+    bank_pes = {int(b): [tuple(q) for q in ps]
+                for b, ps in (prob.get("bank_pes") or {}).items()}
 
-    used = set()
+    load = {}
     where = {}
-    mem_cursor = {}
-    alu_cursor = 0
     for idx in order:
         n = nodes[idx]
         if n["is_mem"]:
             bank = var_bank.get(n["var"], None)
-            row = bank if (bank is not None and bank in mem_rows) else None
-            cands = mem_rows.get(row) if row is not None else None
+            cands = bank_pes.get(bank) if bank is not None else None
             if not cands:
                 cands = sorted(pe_mem)
-            k = mem_cursor.get(row, 0)
-            pick = None
-            for off in range(len(cands)):
-                c = cands[(k + off) % len(cands)]
-                if c not in used:
-                    pick = c
-                    break
-            if pick is None:
-                pick = cands[k % len(cands)]
-            mem_cursor[row] = k + 1
+            cands = sorted(cands)
         else:
-            # 沿"深度"决定列，让依赖链沿行方向铺开
             col = 1 + (depth[idx] % max(1, xdim - 1))
-            row = alu_cursor % max(1, ydim)
-            pick = None
-            for off in range(len(pe_alu)):
-                c = (col, (row + off) % ydim)
-                if c in pe_alu and c not in used:
-                    pick = c
-                    break
-            if pick is None:
-                pick = pe_alu[alu_cursor % len(pe_alu)]
-            alu_cursor += 1
-        used.add(pick)
+            cands = [(col, y) for y in range(ydim) if (col, y) in set(pe_alu)]
+            if not cands:
+                cands = sorted(pe_alu)
+        # 挑负载最轻的那块 PE（相位槽位还没用满就优先）
+        best = None
+        for c in cands:
+            used = load.get(c, 0)
+            if best is None or used < load.get(best, 0):
+                best = c
+        pick = best if best is not None else cands[0]
+        load[pick] = load.get(pick, 0) + 1
         where[idx] = pick
-    return where
-
-
-def _assign_phases(prob, order, nodes, where, ii):
-    """按拓扑序推相位：子节点尽量紧跟父节点，撞槽位就往后推一拍。"""
-    t = {}
-    occupied = set()
-    for idx in order:
-        n = nodes[idx]
-        base = 0
-        for p in n["parents"]:
-            if p not in t:
-                continue
-            lat_p = nodes[p]["lat"] or 1
-            d = abs(where[p][0] - where[idx][0]) + abs(where[p][1] - where[idx][1])
-            base = max(base, t[p] + lat_p + d)
-        slot = base
-        limit = base + ii * 4
-        while (where[idx][0], where[idx][1], slot % ii) in occupied and slot < limit:
-            slot += 1
-        occupied.add((where[idx][0], where[idx][1], slot % ii))
-        t[idx] = slot
-    return {i: (where[i][0], where[i][1], t[i] % ii) for i in where}
-
-
-def place(prob, ii):
-    order, nodes = _topo(prob)
-    depth = _depth(prob, order, nodes)
-    where = _assign_units(prob, order, nodes, depth)
-    return _assign_phases(prob, order, nodes, where, ii)
-
+    return {i: (where[i][0], where[i][1]) for i in where}
 
 # EVOLVE-BLOCK-END

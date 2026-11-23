@@ -50,6 +50,8 @@ def check(prob, place, ii=None):
                     val = val[0]
             if isinstance(val, dict):
                 x, y, t = val["x"], val["y"], val["t"]
+            elif len(val) == 2:
+                x, y, t = val[0], val[1], -1
             else:
                 x, y, t = val[0], val[1], val[2]
             pins[int(idx)] = (int(x), int(y), int(t))
@@ -60,6 +62,9 @@ def check(prob, place, ii=None):
     # 允许传绝对调度时刻（morpher 的 mappingwithlatency.txt 就是绝对拍），
     # 统一折算到 [0, ii) 的相位。负值保留给"未指定相位"。
     pins = {i: (x, y, (t % ii) if t >= 0 else t) for i, (x, y, t) in pins.items()}
+    # No phase anywhere means the caller let the mapper schedule; then only
+    # spatial facts are checkable here.
+    spatial_only = all(t < 0 for (_x, _y, t) in pins.values())
 
     nodes = {n["idx"]: n for n in prob["nodes"]}
     xdim, ydim = prob["xdim"], prob["ydim"]
@@ -102,7 +107,7 @@ def check(prob, place, ii=None):
         if not (0 <= x < xdim and 0 <= y < ydim):
             errors.append("node %d at (%d,%d) outside %dx%d" % (idx, x, y, xdim, ydim))
             continue
-        if not (0 <= t < ii):
+        if t >= 0 and not (0 <= t < ii):
             errors.append("node %d phase %d outside [0,%d)" % (idx, t, ii))
             continue
         is_mem_pe = (x, y) in pe_mem
@@ -117,14 +122,56 @@ def check(prob, place, ii=None):
             else:
                 errors.append("node %d op %s not in %s"
                               % (idx, op, "FU_MEM" if is_mem_pe else "FU"))
-        key = (x, y, t)
-        if key in slots:
+        # bank 可达性：访存算子带变量时，该变量所在的 bank 必须能连到这块 PE_MEM。
+        # 这是 morpher 在 estimateRouting 里就拒掉的硬约束（候选集为空），
+        # 静态模型之前完全不知道，于是进化出的解全在这一点上被真 mapper 驳回。
+        if prob.get("bank_pes_known") and is_mem_pe:
+            var = n.get("var")
+            if var:
+                bid = (prob.get("var_bank") or {}).get(var)
+                if bid is not None:
+                    reach = [tuple(r) for r in (prob.get("bank_pes") or {}).get(bid) or []]
+                    if reach and (x, y) not in reach:
+                        errors.append(
+                            "node %d (%s) accesses %s in bank %d, which cannot reach "
+                            "PE_MEM (%d,%d); reachable: %s"
+                            % (idx, op, var, bid, x, y,
+                               ", ".join("(%d,%d)" % (a, b) for a, b in reach)))
+                        continue
+        key = (x, y, t) if not spatial_only else (x, y, 0)
+        if spatial_only:
+            slots.setdefault(key, []).append(idx)
+        elif key in slots:
             errors.append("node %d and %d share (x=%d,y=%d,t=%d)" % (slots[key], idx, x, y, t))
         else:
             slots[key] = idx
 
     if errors:
         return {"ok": False, "errors": errors[:12], "cost": 0.0, "stats": {}}
+
+    if spatial_only:
+        # Capacity is the only remaining hard fact: a PE runs one op per phase,
+        # so it can host at most ii nodes. Overfilling it is legal only if the
+        # mapper manages to spread the phases -- but we know it cannot, so it is
+        # a hard error.
+        over = 0
+        for cell, ids in slots.items():
+            if len(ids) > ii:
+                over += len(ids) - ii
+                errors.append("PE (%d,%d) holds %d nodes but has only %d phase slots: %s"
+                              % (cell[0], cell[1], len(ids), ii, ids[:8]))
+        if errors:
+            return {"ok": False, "errors": errors[:12], "cost": 0.0, "stats": {}}
+        occ = {cell: len(ids) for cell, ids in slots.items()}
+        used = len(occ)
+        peak = max(occ.values()) if occ else 0
+        return {
+            "ok": True,
+            "errors": [],
+            "cost": float(over * 10),
+            "stats": {"spatial_only": True, "pes_used": used, "peak_occ": peak,
+                      "n_nodes": len(pins)},
+        }
 
     # 2. 相位与跳数
     parents_of = {}

@@ -69,19 +69,26 @@ def find_solution(kernel, valid_ids):
                 if p.isdigit():
                     ii = int(p)
                     break
-        for name in sorted(os.listdir(d)):
-            path = os.path.join(d, name)
-            place = {}
-            if name.endswith(".routeInfo.log"):
-                place = parse_route_log(path)
-            elif name.endswith(".mappingwithlatency.txt"):
-                place = parse_latency_txt(path)
-            # 路由日志里混着内部节点，只留 DFG 里真的有的 idx
-            place = {k: v for k, v in place.items() if k in valid_ids}
-            if len(place) == len(valid_ids):
-                return place, ii or 4, os.path.join(sub, name)
-            if place and best[0] is None:
-                best = (place, ii or 4, os.path.join(sub, name))
+        # 优先 routeInfo.log：第 4 列是 PE 的相位（0..II-1），正是 pin 需要的语义。
+        # mappingwithlatency.txt 第 4 列是**绝对调度时刻**（mac 上能到 11），
+        # 必须 % II 才是相位 —— 两个文件语义不同，混用会让 pin 全错。
+        for want in ("routeInfo", "latency"):
+            for name in sorted(os.listdir(d)):
+                path = os.path.join(d, name)
+                place = {}
+                if want == "routeInfo" and name.endswith(".routeInfo.log"):
+                    place = parse_route_log(path)
+                elif want == "latency" and name.endswith(".mappingwithlatency.txt"):
+                    place = {n: (v[0], v[1], v[2] % (ii or 4))
+                             for n, v in parse_latency_txt(path).items()}
+                else:
+                    continue
+                # 路由日志里混着内部节点，只留 DFG 里真的有的 idx
+                place = {k: v for k, v in place.items() if k in valid_ids}
+                if len(place) == len(valid_ids):
+                    return place, ii or 4, os.path.join(sub, name)
+                if place and best[0] is None:
+                    best = (place, ii or 4, os.path.join(sub, name))
     return best
 
 

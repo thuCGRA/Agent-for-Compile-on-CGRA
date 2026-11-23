@@ -16,3 +16,5 @@ __pycache__/
 evo/config.yaml
 famou_data/
 famou_data_mock/
+famou_*.log
+evo/config.mapper.yaml

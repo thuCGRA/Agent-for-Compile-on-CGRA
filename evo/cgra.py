@@ -11,7 +11,22 @@ import re
 MEMORY_OPS = frozenset((
     "LOAD", "LOADB", "LOADH", "LOADCL",
     "STORE", "STOREB", "STOREH",
+    # OLOAD/OSTORE 同时出现在 FU 与 FU_MEM 两张表里（延迟 1 / 2），
+    # 光看"是否只在 FU_MEM 里"会漏掉它们；但 morpher 的 estimateRouting
+    # 不会给 ALU PE 出候选，所以它们实质上也只能落 PE_MEM。
+    "OLOAD", "OLOADB", "OLOADH", "OLOADCL",
+    "OSTORE", "OSTOREB", "OSTOREH",
 ))
+
+
+def touches_memory(op):
+    """算子是否访问存储器。
+
+    不能用 `var != None` 判：地址计算类算子（ADD var='A'）也带
+    BasePointerName，但它们只在 ALU 上算地址，不碰 memory port。
+    """
+    op = op.upper()
+    return ("LOAD" in op) or ("STORE" in op)
 
 _NODE_RE = re.compile(r"<Node\b(.*?)</Node>", re.S)
 _ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
@@ -136,6 +151,28 @@ def parse_arch(path):
         for v in layout:
             var_bank.setdefault(v, bid)
 
+    # bank -> reachable PE_MEM coordinates, read from CGRA.CONNECTIONS.
+    # Do not guess by row index: HyCUBE 4x4 binds SPM_B0 to y=0,1 and SPM_B1
+    # to y=2,3 (two MEMPORTs per bank).
+    bank_pes = {}
+    bank_pes_known = False
+    conns = A.get("CGRA", {}).get("CONNECTIONS", {}) or {}
+    if isinstance(conns, dict):
+        for src, dsts in conns.items():
+            m = re.match(r"^PE(?:_MEM)?_X(\d+)_Y(\d+)\.MEMPORT$", str(src))
+            if not m:
+                continue
+            xy = (int(m.group(1)), int(m.group(2)))
+            if not isinstance(dsts, list):
+                dsts = [dsts]
+            for d in dsts:
+                mb = re.match(r"^SPM_B(\d+)_WRAPPER_INS\.MEMPORT", str(d))
+                if mb:
+                    bank_pes.setdefault(int(mb.group(1)), []).append(xy)
+                    bank_pes_known = True
+    for b in bank_pes:
+        bank_pes[b] = sorted(set(bank_pes[b]))
+
     return {
         "file": os.path.basename(path),
         "xdim": xdim,
@@ -143,6 +180,8 @@ def parse_arch(path):
         "kind": kind,
         "pe_mem": pe_mem,
         "pe_alu": pe_alu,
+        "bank_pes": bank_pes,
+        "bank_pes_known": bank_pes_known,
         "alu_ops": alu_ops,
         "mem_ops": mem_ops,
         "alu_lat": min(alu_ops.values()) if alu_ops else 1,
@@ -195,8 +234,8 @@ def build_problem(kernel, dfg_path, arch_path, ii):
             "children": n["children"],
             "const": n["const"],
             "var": n["var"],
-            "is_mem": n["op"] in MEMORY_OPS,
-            "lat": lat(n["op"], n["op"] in MEMORY_OPS),
+            "is_mem": touches_memory(n["op"]),
+            "lat": lat(n["op"], touches_memory(n["op"])),
             "asap": n.get("asap") or 0,
         })
 
@@ -231,6 +270,8 @@ def build_problem(kernel, dfg_path, arch_path, ii):
         "alu_lat_map": dict(arch["alu_ops"]),
         "mem_lat_map": dict(arch["mem_ops"]),
         "var_bank": arch["var_bank"],
+        "bank_pes": arch.get("bank_pes", {}),
+        "bank_pes_known": arch.get("bank_pes_known", False),
         "bank_vars": {str(k): v for k, v in arch["bank_vars"].items()},
         "res_min_ii": res_ii,
         "rec_min_ii": rec_ii,

@@ -52,64 +52,91 @@ def place(prob, ii) -> {node_idx: (x, y, t)}
 `pe_mem`/`pe_alu` 坐标、`xdim/ydim`、`var_bank`（变量 → bank）、算子延迟表、
 以及 `tight`/`loose`/`rec_min_ii` 三个 II 参数。
 
-### 两档 II：紧档 = RecMinII，松档 = 紧档 + 1
+### 接口：只给 (x, y)，相位交给 mapper
 
-三个 kernel 的 **RecMinII 都是 4**（实测 `scripts/map.sh <k> 0 3`，morpher 打印
-`Initial target II = 4 (ResMin II = 2 , RecMin II = 4, UserGiven II = 3 )`）。
-RecMinII 的定义照抄 `src/mapper/src/mapper/HeuristicMapper.cpp:2002`
-的 `getRecMinimumII()`：对所有 `child->ASAP <= node->ASAP` 的反向边取
-`node->ASAP - child->ASAP + 1` 的最大值。
-
-所以「II=3 冲刺目标」是**不存在的**（早期版本给了它 40% 权重，等于让 LLM 花四成
-力气追不可达解）。现在是 `tight = max(rec_min_ii, 1)`、`loose = tight + 1`。
-
-### 合法 = 静态约束过 **且** 真的布得出来
-
-`check.py` 判静态部分（便宜）：
-
-1. **硬约束**：每个节点恰好一个位置、`(x,y,t)` 不重复、越界、
-   `ii >= rec_min_ii`、算子必须在其所在 PE 类型的算子表里。
-   注意 ALU 与 PE_MEM **都能做算术**（`FU` 28 ops、`FU_MEM` 35 ops，后者只多
-   7 个纯访存算子），差别只在延迟（ALU 1 拍、PE_MEM 2 拍）。
-2. **相位与绕路**：一条边 `p→c` 的跳数 `h` 必须满足
-   `h ≡ (t_c - t_p - lat_p) (mod ii)` 且 `h >= 曼哈顿距离`。
-   SELECT / CMERGE 的两条父边必须落在 `t` 和 `t-1` 两拍
-   （HyCUBE 的 FU 一拍只能收一个操作数，morpher 模拟器会在这上面断言）。
-
-`router.py` 判动态部分（时间扩展图上的真布线）：每个单元 `(x,y)`、每条链路每个相位
-只能过一个值，传输途中允许在 PE 寄存器里原地等拍（等拍不占链路）。
-`route(prob, place, ii)` 返回 `{ok, unrouted, detour, hops_total}`。
-
-**为什么必须接 router**：同一份 II=4 放置，静态分说基线处处更好，router 说
-`array_add` 根本布不出来。
-
-| kernel | morpher 真解 | 贪心基线 `init.py` |
-|---|---|---|
-| array_add | 可布 detour=38 | **不可布**（静态 cost 12） |
-| mac | 可布 detour=48 | 可布 detour=45 |
-| trmm | 可布 detour=20 | 可布 detour=15 |
-
-### 分数
-
-```
-per_kernel = 0.85 / (1 + detour_at_tight / 20)   # 仅当紧档"合法且可布"
-           + 0.15                                # 仅当松档也合法
-combined_score = mean(per_kernel over {array_add, mac, trmm})
-validity       = 紧档可布的内核数 / 3
+```python
+def place(prob, ii) -> {node_idx: (x, y)}
 ```
 
-`detour_at_tight` 是紧档下所有边绕路跳数之和（真实布线走出来，不是下界）。
+**这是本设计最要紧的一条，也是踩过坑之后改的。** 相位不是映射器的输入：
+`PathFinderMapper::estimateRouting` 里断言
 
-基线 `init.py` 得 **0.399084**，`validity = 0.667`（array_add 在 II=4 布不出来，
-只拿到松档的 0.15）。把 morpher 自己的解当作"程序"来评分是 **0.322701**、
-`validity = 1.0` —— 它三个都布得出来但绕路更多。
+```cpp
+assert((minLatDestVal) % destPort->getMod()->getCGRA()->get_t_max() == destPort->getMod()->getPE()->T);
+```
 
-> **还剩下的局限**：`router.py` 是**我们自己的**布线器，不是 morpher 的 PathFinder，
-> 也不是模拟器。它能回答"这个放置在这个抽象模型下布不布得出来"，但
-> **不能代替 `scripts/sim.sh` 的功能验证**（数值对不对只有仿真器知道）。
-> 拿进化出的最优解跑一遍 `map.sh` + `sim.sh` 仍然必须有。
+也就是"数据什么时候到达，PE 就在那一拍执行"。相位是数据到达时间的**结果**。
+早期版本让演化程序自己给 `(x, y, t)`，三个 kernel 上 strict 钉相位被拒 **3/3**；
+改成只钉 `(x, y)`（`t = -1` 表示由 mapper 决定）之后，同一个程序通过 **2/3**。
 
-## 四、环境
+于是分工是：**演化程序决定空间，mapper 决定时间**。
+
+### 打分：真 mapper + 真仿真器
+
+```
+该内核 0.00                             # 没过 check.py 的硬约束
+该内核 0.15                             # mapper 布通，但仿真失配
+该内核 0.15 + 0.85 / (1 + lat / 40)      # 布通且仿真零失配，lat 越小越高
+combined_score = 三个内核的平均
+validity       = 仿真零失配的内核数 / 3
+```
+
+`lat` 是 mapper 报告里的调度长度（最大绝对时刻），不是我们算的下界。
+
+`check.py` 现在只做**空间**硬约束（便宜、必要、但不充分）：完整性、边界、
+算子与 PE 类型、访存算子的 bank 可达性、每块 PE 最多 `ii` 个节点（它有 `ii` 个
+相位槽位）。它不再是"合法"的判据，只是入场券。
+
+mapper 单次预算 **20 秒**（`harness.MAP_TIMEOUT`）：好的放置 3–4 秒出结果，
+坏的放置会一路算到 164 秒才放弃（实测 mac 的一次坏放置），超时按"没布通"算。
+一次完整评测（三个 kernel，含 mac 超时）约 **30 秒**。
+
+### 为什么把 router.py 降级
+
+`router.py` 是时间扩展图上的自研布线器，静态、毫秒级。它给出的判定与真 mapper
+**系统性不一致**：
+
+| 对象 | 我们的 router | 真 mapper | 仿真 |
+|---|---|---|---|
+| morpher 自己的解 ×3 | 可布 | 通过 3/3 | 零失配 3/3 |
+| 贪心基线（II=4） | 可布 3/3 | 通过 2/3 | 零失配 2/3 |
+| 早期进化最优解 | 可布 3/3 | **通过 0/3** | 未测 |
+
+router 允许"在 PE 寄存器里原地等一拍"（不占链路），这条放宽把大量实际布不出来
+的放置判成可布。**所以 router 只能用来给候选排序，不能当合法性判据。**
+它还留在仓库里作为快速预筛，但适应度不再经过它。
+
+同理，静态代价（绕路跳数之和）也不能当分数：同一份 II=4 放置，静态分说贪心基线
+处处优于 morpher 自己的解，真跑一遍却是基线在 mac 上布不出来。
+
+### 校准锚点
+
+用同一套适应度给 morpher 自己的解放打分（`evo/verify_against_mapper.py` 从
+`out/<kernel>/m0/*.routeInfo.log` 抠出 `(x, y)`，相位丢弃）：
+
+| 对象 | combined | validity | array_add | mac | trmm |
+|---|---|---|---|---|---|
+| **morpher 自己的解** | **0.845** | 1.000 | lat 11 | lat 10 | lat 6 |
+| 贪心基线 `evo/init.py` | 0.564 | 0.667 | lat 12 | **超时** | lat 6 |
+
+这张表是适应度可信的证据：真正的上游解拿到最高分，基线差在 mac。
+也说明上限大概在 0.85 附近 —— 分数到 0.9 就意味着比 morpher 自己排得还紧。
+
+### 一次评测里发生什么
+
+```
+place(prob, ii)                     # 演化程序的输出，纯 Python，无 IO
+  → out/_evo_pins/fit_<kernel>_ii4.json     {"pins":[{node,x,y,t:-1}]}
+  → scripts/map_pinned.sh <k> <pins> 1 4 4 4 _evo_fit_<k>_ii4
+      cgra_xml_mapper -m 3 --pins_mode 1 --report pins_report.json
+  → out/<k>/_evo_fit_<k>_ii4/pins_report.json      {ok, lat, stage, applied, ...}
+  → scripts/sim.sh <k> 1 4096 _evo_fit_<k>_ii4    （仅在 mapper ok 时）
+  → out/<k>/_evo_fit_<k>_ii4/sim_result.txt        Matches::N, Mismatches::M
+```
+
+`map_and_sim()` 每次评测前会**删掉旧目录**：目录名是固定的，超时留下的上一次
+`pins_report.json` 会被当成本次的判决读进去（这个 bug 真发生过）。
+
 ## 四、环境
 
 伐谋要求 Python ≥ 3.12，acc-thu 的 `cgra-tc`/`cgra` 都不满足，所以单开一个环境：
@@ -176,10 +203,16 @@ token 与耗时（排查"空响应"就看这里：`response_tokens` 撞到 `max_
 
 ## 七、已知限制
 
-* **适应度是静态代理**，没有真实布线/仿真（见第三节的警告框）；
+* **每次评测真跑 mapper 与仿真器**，一次约 30 秒（mac 在坏放置上会撞 20 秒超时）。相比纯静态的
+  50 ms，这是为了让分数有意义而付的代价；也因此 `max_iterations` 不要开大。
 * 只看 3 个 kernel（`array_add` / `mac` / `trmm`），加 kernel 要改 `harness.KERNELS`，
   并且先跑 `scripts/run_all.sh` 生成 `out/<k>/{dfg.xml,arch.json}`；
-* 评测是纯 Python、每次 ~50 ms–0.5 s，`max_workers` 可以开大；
 * 演化程序在子进程里跑（`harness.run_program`），超时 120 s 直接判 0，防止死循环
   卡住整轮；
-* 岛屿并行度受 LLM 端点并发限制，实测 2 worker 时每轮 150–250 s。
+* 岛屿并行度受 LLM 端点并发限制，实测 2 worker 时每轮 3–6 分钟；
+* **适应度与 mapper 强相关**：同一份放置在上游 PathFinder 与本工程上的结果可能不同
+  （`~/cac` 的 mapper 是有行为差异的 fork，`allowed_time_steps_for_connection`
+  被改过）。分数只能在**同一份 mapper 二进制**下横向比较。
+* `router.py` 仍在仓库里（毫秒级预筛、候选排序），但**不参与打分**，见第三节。
+* `map_pinned.sh` 依赖 `-m 3`（PinnedMapper），而该能力目前靠 `scripts/patch_pinned_mapper.py`
+  手动打进上游源码，还没落成 `toolchain/patches/0002-*.patch`。
