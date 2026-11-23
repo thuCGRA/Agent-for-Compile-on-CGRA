@@ -18,6 +18,7 @@
 #include <morpher/mapper/HeuristicMapper.h>
 #include <morpher/mapper/PathFinderMapper.h>
 #include <morpher/mapper/SimulatedAnnealingMapper.h>
+#include <morpher/mapper/PinnedMapper.h>
 #include <morpher/lisa/LISAMapper.h>
 #include <math.h>
 
@@ -92,6 +93,12 @@ int main(int argn, char *argc[])
 		// assert(false && "convert to SA");
 	}else if(mapping_method  == 2){
 		mapper = new LISAMapper(inputDFG_filename);
+	}else if(mapping_method == 3){
+		PinnedMapper *pinned = new PinnedMapper(inputDFG_filename);
+		pinned->setPinsFile(args.pins_file);
+		pinned->setPinsMode(args.pins_mode == 2 ? PinnedMapper::PINS_REPAIR : PinnedMapper::PINS_STRICT);
+		pinned->setReportFile(args.report_file);
+		mapper = pinned;
 	}else{
 		assert(false && "did not set a valid mapping method");
 	}
@@ -168,6 +175,9 @@ int main(int argn, char *argc[])
 				// this is genreatring traning data. No need to dump results;
 				return 0;
 			}
+		}else if(mapping_method  == 3){
+			PinnedMapper * pinned_mapper = static_cast<PinnedMapper*>(mapper);
+			mappingSuccess = pinned_mapper->MapWithPins(tempCGRA, &tempDFG);
 		}else{
 			assert(false && "did not set a valid mapping method");
 		}
@@ -182,6 +192,12 @@ int main(int argn, char *argc[])
 			}
 
 			delete tempCGRA;
+			if(mapping_method == 3){
+				// pin 里的 t 是按某个 II 算出来的相位，换 II 就全错。
+				// 继续 II++ 只会产出一堆无意义的失败，直接退出。
+				std::cout << "### pinned mapping failed at II = " << II << ", not scanning further\n";
+				break;
+			}
 			II++;
 
 			if (II == max_II)

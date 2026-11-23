@@ -1504,6 +1504,15 @@ bool CGRAXMLCompile::PathFinderMapper::Map(CGRA *cgra, DFG *dfg)
 						return false;
 					}
 				}
+							if (!this->restrictDestinations(node, estimatedRoutes))
+				{
+					std::cout << "Pins rejected node " << node->idx << " :: " << this->lastRestrictError << "\n";
+					mappingLog << "Pins rejected node " << node->idx << " :: " << this->lastRestrictError << "\n";
+					mappingLog.close();
+					mappingLog2.close();
+					mappingLog4.close();
+					return false;
+				}
 				estimatedRouteInfo[node] = estimatedRoutes;
 			}
 

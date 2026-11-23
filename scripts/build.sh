@@ -39,10 +39,25 @@ chmod +x "$CX"
 apply_patch() {
   local dir="$1" p="$2"
   local marker="$dir/.$(basename "$p").applied"
-  [ -f "$p" ] || { echo "  (无 patch) $p"; return 0; }
-  [ -f "$marker" ] && { echo "  已应用 $(basename "$p")"; return 0; }
-  echo "  应用 $(basename "$p")"
-  ( cd "$dir" && patch -p1 -N --no-backup-if-mismatch < "$p" ) || return 1
+  local name
+  name="$(basename "$p")"
+  [ -f "$p" ] || { echo "  (no patch) $p"; return 0; }
+  [ -f "$marker" ] && { echo "  skip $name (marker)"; return 0; }
+
+  # Idempotent: the committed tree may already carry the change (git archive of
+  # a fork), so probe before touching anything. Forward dry-run applies; reverse
+  # dry-run means "already applied, nothing to do"; both failing is a real
+  # conflict and must stop the build.
+  if ( cd "$dir" && patch -p1 -N --dry-run --no-backup-if-mismatch < "$p" ) >/dev/null 2>&1; then
+    echo "  apply $name"
+    ( cd "$dir" && patch -p1 -N --no-backup-if-mismatch < "$p" ) || return 1
+  elif ( cd "$dir" && patch -p1 -R --dry-run --no-backup-if-mismatch < "$p" ) >/dev/null 2>&1; then
+    echo "  skip $name (already applied)"
+  else
+    echo "  ERROR $name does not apply cleanly to $dir" >&2
+    ( cd "$dir" && patch -p1 -N --dry-run --no-backup-if-mismatch < "$p" ) >&2 || true
+    return 1
+  fi
   touch "$marker"
 }
 
@@ -61,6 +76,7 @@ cp "$ROOT/build/dfggen/src/libdfggenPass.so" "$OUT/"
 
 banner "[2/3] mapper (cgra_xml_mapper)"
 apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0001-mapper-no-hardcoded-compiler.patch"
+apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0002-pinned-mapper.patch"
 cmake -S "$SRC/mapper" -B "$ROOT/build/mapper" -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER="$GCC" -DCMAKE_CXX_COMPILER="$GXX" \
   -DCMAKE_C_FLAGS="$HOSTFLAGS" -DCMAKE_CXX_FLAGS="$HOSTFLAGS" \

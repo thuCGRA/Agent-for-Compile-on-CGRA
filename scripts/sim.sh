@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bitstream + trace → 周期级仿真 → matches/mismatches
-# 用法: scripts/sim.sh <kernel> [method] [mem_size]
+# 用法: scripts/sim.sh <kernel> [method] [mem_size] [subdir]
+#   subdir: 产物目录名，默认 m<method>；钉住布线的产物在 pins<mode>
 # 产物: out/<kernel>/m<method>/sim_result.txt
 #
 # 判定：Mismatches::0 且 Matches>0 即功能正确。其它情况都不算通过。
@@ -9,8 +10,9 @@ source "$(dirname "$0")/lib.sh"
 k="${1:?用法: sim.sh <kernel> [method] [mem_size]}"
 M="${2:-0}"
 MEM="${3:-4096}"
+SUB="${4:-}"
 W="$(kdir "$k")"
-R="$W/m$M"
+[ -n "$SUB" ] && R="$W/$SUB" || R="$W/m$M"
 [ -d "$R" ] || { echo "先跑 map.sh $k $M" >&2; exit 2; }
 [ -f "$W/trace_0.txt" ] || { echo "先跑 gen_trace.sh $k" >&2; exit 2; }
 cd "$R"

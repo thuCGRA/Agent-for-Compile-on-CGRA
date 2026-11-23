@@ -1,0 +1,503 @@
+上游 mapper 只能自己找解，不能接受外部给出的放置。本补丁加一个第 4 种 mapping method：
+-m 3 / --pins <json> / --pins_mode {0,1,2} / --report <json>
+
+pin 里 t < 0 表示只钉空间 (x, y)、相位交给 mapper；这是实测得出的正确用法：
+相位是 estimateRouting 里由数据到达时间推出来的结果，不是输入。
+
+四处改动：
+  1. HeuristicMapper.h：加虚函数 restrictDestinations() 钩子 + lastRestrictError；
+  2. PathFinderMapper.cpp：estimateRouting 之后调钩子（不影响 -m 0/1/2）；
+  3. util.h：加 --pins / --pins_mode / --report 三个参数；
+  4. CGRA_xml_compiler.cpp：-m 3 分派到 PinnedMapper，并在失败时不再 II++（pin 的相位
+     按某个 II 算的，换 II 就全错）。
+
+新增文件 PinnedMapper.h / PinnedMapper.cpp，不需要改 CMakeLists.txt
+（它用 FILE(GLOB_RECURSE ... *.cpp)。
+
+diff --git a/include/morpher/mapper/HeuristicMapper.h b/include/morpher/mapper/HeuristicMapper.h
+index 9210261..329b80f 100644
+--- a/include/morpher/mapper/HeuristicMapper.h
++++ b/include/morpher/mapper/HeuristicMapper.h
+@@ -241,6 +241,15 @@ public:
+ 	bool estimateRouting(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes, DFGNode **failedNode);
+ 	bool Route(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes, DFGNode **failedNode);
+ 
++	// 基类在 estimateRouting() 成功之后、Route() 之前调用；返回 false 表示
++	// 放弃这个节点（候选队列按当前状态处理）。默认实现什么都不做。
++	virtual bool restrictDestinations(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes)
++	{
++		(void)node; (void)estimatedRoutes;
++		return true;
++	}
++	std::string lastRestrictError;
++
+ 	void assignPath(DFGNode *src, DFGNode *dest, std::vector<LatPort> path);
+ 	bool dataPathCheck(DataPath *dp, DFGNode *node);
+ 
+diff --git a/include/morpher/mapper/PinnedMapper.h b/include/morpher/mapper/PinnedMapper.h
+new file mode 100644
+index 0000000..3e6c769
+--- /dev/null
++++ b/include/morpher/mapper/PinnedMapper.h
+@@ -0,0 +1,83 @@
++/*
++ * PinnedMapper.h
++ *
++ *  A PathFinderMapper whose per-node candidate queue is constrained by an
++ *  external placement (the "pins" JSON produced by our evolution / agent loop).
++ *
++ *  Why this exists: the evolution branch scores placements with its own static
++ *  checker plus a router we wrote. Neither of them is morpher. The only way to
++ *  know whether a placement we produced is real is to hand it to morpher and ask
++ *  it to route exactly that placement, then simulate.
++ *
++ *  Design:
++ *   - placement decided outside, routing decided inside. The pin only filters or
++ *     reorders the queue that estimateRouting() already built, so Route() and
++ *     LeastCostPathAstar() run unchanged. If a pinned placement maps, morpher
++ *     really did find a route for it -- we did not weaken the router.
++ *   - no assert() on the pins path. A bad hint must produce a machine readable
++ *     report, because the caller consumes the report to decide what to try next.
++ *   - t < 0 means "phase free": only (x, y) is binding and the mapper picks the
++ *     phase. Useful when you trust the spatial decision but not the schedule.
++ */
++
++#include <morpher/mapper/PathFinderMapper.h>
++
++#include <map>
++#include <string>
++
++#ifndef PINNEDMAPPER_H_
++#define PINNEDMAPPER_H_
++
++namespace CGRAXMLCompile
++{
++
++struct PlacementPin
++{
++	bool set = false;
++	int node = -1;
++	int x = -1;
++	int y = -1;
++	int t = -1; // phase of the PE (PE::T); < 0 means phase free
++};
++
++class PinnedMapper : public PathFinderMapper
++{
++public:
++	enum PinsMode
++	{
++		PINS_OFF = 0,
++		PINS_STRICT = 1, // every node must land exactly on its pin
++		PINS_REPAIR = 2	 // unhonourable pins are dropped, the rest are kept
++	};
++
++	PinnedMapper(std::string fName) : PathFinderMapper(fName)
++	{
++		mapping_method_name = "Pinned";
++	}
++
++	void setPinsFile(std::string f) { pinsFileName = f; }
++	void setReportFile(std::string f) { reportFileName = f; }
++	void setPinsMode(PinsMode m) { pinsMode = m; }
++
++	bool loadPins();
++
++	// Same search as method 0, but with pinned candidate queues; writes
++	// reportFileName on the way out (success or failure).
++	bool MapWithPins(CGRA *cgra, DFG *dfg);
++
++	bool restrictDestinations(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes) override;
++
++private:
++	void writeReport(bool ok, CGRA *cgra);
++
++	std::map<int, PlacementPin> pins;
++	std::string pinsFileName;
++	std::string reportFileName;
++	PinsMode pinsMode = PINS_OFF;
++	int pinsApplied = 0;
++	int pinsRejected = 0;
++};
++
++} /* namespace CGRAXMLCompile */
++
++#endif /* PINNEDMAPPER_H_ */
+diff --git a/include/morpher/util/util.h b/include/morpher/util/util.h
+index 6e6fde2..31dcf88 100644
+--- a/include/morpher/util/util.h
++++ b/include/morpher/util/util.h
+@@ -44,6 +44,10 @@ struct arguments
+ 	int mapping_method = 0; // 0: PathFinderMapper, 1: SAMapper (SimulatedAnnealing),  HeuristicMapper will not be used
+ 	int max_II = 32;
+ 	std::string arch_name = "";
++	// 钉住放置：pins_file 为空时 PinnedMapper 退化成普通 PathFinder
++	std::string pins_file = "";
++	int pins_mode = 1; // 1=strict, 2=repair
++	std::string report_file = "";
+ 	lisa_arguments lisa_arg;
+ };
+ 
+@@ -139,6 +143,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
+ 		.add_option<int>("", "--max_II", "max II", 32)
+ 		.add_option<std::string>("", "--arch_name", "architecture name", "")
+ 		.add_option<bool>("", "--lisa_training", "lisa training", false)
++		.add_option<std::string>("", "--pins", "placement pins json (node/x/y/t)", "")
++		.add_option<int>("", "--pins_mode", "1=strict, 2=repair", 1)
++		.add_option<std::string>("", "--report", "machine readable result json", "")
+ 		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
+         .parse(argn, argc);
+ 
+@@ -159,6 +166,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
+ 	ret.arch_name = args.get_option<std::string>("--arch_name");
+ 	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");
+ 	lisa_arg.training = args.get_option<bool>("--lisa_training");
++	ret.pins_file = args.get_option<std::string>("--pins");
++	ret.pins_mode = args.get_option<int>("--pins_mode");
++	ret.report_file = args.get_option<std::string>("--report");
+ 	lisa_arg.dfg_id = args.get_option<std::string>("--dfg_id");
+ 	ret.lisa_arg = lisa_arg;
+ 	assert(ret.dfg_filename!= "");
+diff --git a/src/CGRA_xml_compiler.cpp b/src/CGRA_xml_compiler.cpp
+index ab5e4f1..cca97af 100644
+--- a/src/CGRA_xml_compiler.cpp
++++ b/src/CGRA_xml_compiler.cpp
+@@ -18,6 +18,7 @@
+ #include <morpher/mapper/HeuristicMapper.h>
+ #include <morpher/mapper/PathFinderMapper.h>
+ #include <morpher/mapper/SimulatedAnnealingMapper.h>
++#include <morpher/mapper/PinnedMapper.h>
+ #include <morpher/lisa/LISAMapper.h>
+ #include <math.h>
+ 
+@@ -92,6 +93,12 @@ int main(int argn, char *argc[])
+ 		// assert(false && "convert to SA");
+ 	}else if(mapping_method  == 2){
+ 		mapper = new LISAMapper(inputDFG_filename);
++	}else if(mapping_method == 3){
++		PinnedMapper *pinned = new PinnedMapper(inputDFG_filename);
++		pinned->setPinsFile(args.pins_file);
++		pinned->setPinsMode(args.pins_mode == 2 ? PinnedMapper::PINS_REPAIR : PinnedMapper::PINS_STRICT);
++		pinned->setReportFile(args.report_file);
++		mapper = pinned;
+ 	}else{
+ 		assert(false && "did not set a valid mapping method");
+ 	}
+@@ -168,6 +175,9 @@ int main(int argn, char *argc[])
+ 				// this is genreatring traning data. No need to dump results;
+ 				return 0;
+ 			}
++		}else if(mapping_method  == 3){
++			PinnedMapper * pinned_mapper = static_cast<PinnedMapper*>(mapper);
++			mappingSuccess = pinned_mapper->MapWithPins(tempCGRA, &tempDFG);
+ 		}else{
+ 			assert(false && "did not set a valid mapping method");
+ 		}
+@@ -182,6 +192,12 @@ int main(int argn, char *argc[])
+ 			}
+ 
+ 			delete tempCGRA;
++			if(mapping_method == 3){
++				// pin 里的 t 是按某个 II 算出来的相位，换 II 就全错。
++				// 继续 II++ 只会产出一堆无意义的失败，直接退出。
++				std::cout << "### pinned mapping failed at II = " << II << ", not scanning further\n";
++				break;
++			}
+ 			II++;
+ 
+ 			if (II == max_II)
+diff --git a/src/mapper/PathFinderMapper.cpp b/src/mapper/PathFinderMapper.cpp
+index 5190af1..bb4fcf4 100644
+--- a/src/mapper/PathFinderMapper.cpp
++++ b/src/mapper/PathFinderMapper.cpp
+@@ -1503,6 +1503,15 @@ bool CGRAXMLCompile::PathFinderMapper::Map(CGRA *cgra, DFG *dfg)
+ 						mappingLog4.close();
+ 						return false;
+ 					}
++				}
++							if (!this->restrictDestinations(node, estimatedRoutes))
++				{
++					std::cout << "Pins rejected node " << node->idx << " :: " << this->lastRestrictError << "\n";
++					mappingLog << "Pins rejected node " << node->idx << " :: " << this->lastRestrictError << "\n";
++					mappingLog.close();
++					mappingLog2.close();
++					mappingLog4.close();
++					return false;
+ 				}
+ 				estimatedRouteInfo[node] = estimatedRoutes;
+ 			}
+diff --git a/src/mapper/PinnedMapper.cpp b/src/mapper/PinnedMapper.cpp
+new file mode 100644
+index 0000000..d1bc0d2
+--- /dev/null
++++ b/src/mapper/PinnedMapper.cpp
+@@ -0,0 +1,269 @@
++/*
++ * PinnedMapper.cpp
++ *
++ *  See PinnedMapper.h. The only behavioural change with respect to
++ *  PathFinderMapper::Map() is the restrictDestinations() hook, which the base
++ *  class calls right after estimateRouting() succeeded.
++ */
++
++#include <morpher/mapper/PinnedMapper.h>
++#include <morpher/arch/json.hpp>
++
++#include <fstream>
++#include <iostream>
++#include <vector>
++
++namespace CGRAXMLCompile
++{
++
++static std::string strint(int v) { return std::to_string(v); }
++
++static const char *modeName(int m)
++{
++	return (m == 1) ? "strict" : ((m == 2) ? "repair" : "off");
++}
++
++bool PinnedMapper::loadPins()
++{
++	if (pinsFileName.empty())
++	{
++		std::cerr << "[pins] no --pins given, running as a plain PathFinder\n";
++		return true;
++	}
++
++	std::ifstream in(pinsFileName.c_str());
++	if (!in.is_open())
++	{
++		lastRestrictError = "cannot open pins file: " + pinsFileName;
++		std::cerr << "[pins] " << lastRestrictError << "\n";
++		return false;
++	}
++
++	nlohmann::json j;
++	try
++	{
++		in >> j;
++	}
++	catch (const std::exception &e)
++	{
++		lastRestrictError = std::string("pins json parse error: ") + e.what();
++		std::cerr << "[pins] " << lastRestrictError << "\n";
++		return false;
++	}
++
++	nlohmann::json::iterator it = j.find("pins");
++	if (it == j.end() || !it->is_array())
++	{
++		lastRestrictError = "pins json has no 'pins' array";
++		std::cerr << "[pins] " << lastRestrictError << "\n";
++		return false;
++	}
++
++	for (nlohmann::json::iterator p = it->begin(); p != it->end(); ++p)
++	{
++		PlacementPin pin;
++		pin.set = true;
++		pin.node = p->value("node", -1);
++		pin.x = p->value("x", -1);
++		pin.y = p->value("y", -1);
++		pin.t = p->value("t", -1); // absent t == phase free
++		if (pin.node < 0 || pin.x < 0 || pin.y < 0)
++		{
++			std::cerr << "[pins] skipping malformed pin (need node/x/y >= 0)\n";
++			continue;
++		}
++		if (pins.find(pin.node) != pins.end())
++		{
++			lastRestrictError = "duplicate pin for node " + strint(pin.node);
++			std::cerr << "[pins] " << lastRestrictError << "\n";
++			return false;
++		}
++		pins[pin.node] = pin;
++	}
++
++	std::cout << "[pins] loaded " << pins.size() << " pin(s) from " << pinsFileName
++			  << " (mode=" << modeName(pinsMode) << ")\n";
++	return true;
++}
++
++bool PinnedMapper::restrictDestinations(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes)
++{
++	if (pinsMode == PINS_OFF)
++	{
++		return true;
++	}
++
++	std::map<int, PlacementPin>::const_iterator it = pins.find((int)node->idx);
++	if (it == pins.end())
++	{
++		if (pinsMode == PINS_STRICT)
++		{
++			lastRestrictError = "no pin for node " + strint((int)node->idx) + " (op=" + node->op + ")";
++			++pinsRejected;
++			return false;
++		}
++		return true; // repair: leave this node to the compiler
++	}
++
++	const PlacementPin &pin = it->second;
++
++	// drain the queue built by estimateRouting(), keep what the pin allows
++	std::vector<dest_with_cost> all;
++	while (!estimatedRoutes.empty())
++	{
++		all.push_back(estimatedRoutes.top());
++		estimatedRoutes.pop();
++	}
++
++	int matched = 0;
++	int blocked = 0;
++	int xmin = 1 << 30, xmax = -1, ymin = 1 << 30, ymax = -1;
++
++	for (size_t i = 0; i < all.size(); ++i)
++	{
++		dest_with_cost cand = all[i];
++		PE *pe = cand.dest->getPE();
++		if (pe->X < xmin) xmin = pe->X;
++		if (pe->X > xmax) xmax = pe->X;
++		if (pe->Y < ymin) ymin = pe->Y;
++		if (pe->Y > ymax) ymax = pe->Y;
++
++		bool hit = (pe->X == pin.x) && (pe->Y == pin.y) && (pin.t < 0 || pe->T == pin.t);
++		if (!hit)
++		{
++			continue;
++		}
++
++		// Route() asserts that the destination is free, so never hand an
++		// occupied datapath over to it.
++		if (cand.dest->getMappedNode() != NULL)
++		{
++			++blocked;
++			lastRestrictError = "pinned DP for node " + strint((int)node->idx) + " at (" +
++								strint(pin.x) + "," + strint(pin.y) + ",t" +
++								(pin.t < 0 ? std::string("*") : strint(pin.t)) +
++								") is already occupied by node " +
++								strint((int)cand.dest->getMappedNode()->idx);
++			continue;
++		}
++
++		++matched;
++		estimatedRoutes.push(cand);
++	}
++
++	if (matched == 0)
++	{
++		++pinsRejected;
++		if (pinsMode == PINS_REPAIR)
++		{
++			for (size_t i = 0; i < all.size(); ++i)
++			{
++				estimatedRoutes.push(all[i]);
++			}
++			std::cerr << "[pins] repair: dropping pin for node " << strint((int)node->idx)
++					  << " at (" << strint(pin.x) << "," << strint(pin.y) << ",t"
++					  << (pin.t < 0 ? std::string("*") : strint(pin.t))
++					  << "), the compiler will choose instead\n";
++			return !estimatedRoutes.empty();
++		}
++
++		if (blocked == 0)
++		{
++			// No candidate at all for that (x,y,t). Usually the phase we asked
++			// for is not what morpher's own latency model would produce there,
++			// or the op cannot sit on that PE type.
++			std::string offered;
++			int shown = 0;
++			for (size_t i = 0; i < all.size() && shown < 12; ++i, ++shown)
++			{
++				PE *ope = all[i].dest->getPE();
++				offered += " (" + strint(ope->X) + "," + strint(ope->Y) + ",t" + strint(ope->T) + ")";
++			}
++			if ((int)all.size() > shown)
++			{
++				offered += " ...";
++			}
++			lastRestrictError = "no candidate DP matches pin (x=" + strint(pin.x) + ",y=" +
++								strint(pin.y) + ",t=" +
++								(pin.t < 0 ? std::string("*") : strint(pin.t)) + ") for node " +
++								strint((int)node->idx) + " (op=" + node->op + "); estimateRouting offered " +
++								strint((int)all.size()) + " candidate(s) over x[" + strint(xmin) + ".." +
++								strint(xmax) + "] y[" + strint(ymin) + ".." + strint(ymax) + "]:" + offered;
++		}
++		std::cerr << "[pins] " << lastRestrictError << "\n";
++		return false;
++	}
++
++	++pinsApplied;
++	return true;
++}
++
++void PinnedMapper::writeReport(bool ok, CGRA *cgra)
++{
++	if (reportFileName.empty())
++	{
++		return;
++	}
++
++	nlohmann::json r;
++	r["ok"] = ok;
++	r["mapping_method"] = "pinned";
++	r["pins_mode"] = modeName(pinsMode);
++	r["ii"] = cgra ? cgra->get_t_max() : -1;
++	r["stage"] = ok ? "done" : ((pinsRejected > 0) ? "placement" : "route");
++	r["pins_total"] = (int)pins.size();
++	r["pins_applied"] = pinsApplied;
++	r["pins_rejected"] = pinsRejected;
++	if (!lastRestrictError.empty())
++	{
++		r["error"] = lastRestrictError;
++	}
++
++	nlohmann::json placement = nlohmann::json::array();
++	if (ok)
++	{
++		for (size_t i = 0; i < sortedNodeList.size(); ++i)
++		{
++			DFGNode *n = sortedNodeList[i];
++			if (n->rootDP == NULL)
++			{
++				continue;
++			}
++			PE *pe = n->rootDP->getPE();
++			nlohmann::json e;
++			e["node"] = (int)n->idx;
++			e["op"] = n->op;
++			e["x"] = pe->X;
++			e["y"] = pe->Y;
++			e["t"] = pe->T;
++			e["lat"] = n->rootDP->getLat();
++			placement.push_back(e);
++		}
++	}
++	r["placement"] = placement;
++
++	std::ofstream out(reportFileName.c_str());
++	if (!out.is_open())
++	{
++		std::cerr << "[pins] cannot write report " << reportFileName << "\n";
++		return;
++	}
++	out << r.dump(2) << "\n";
++	out.close();
++	std::cout << "[pins] report -> " << reportFileName << " (ok=" << (ok ? "true" : "false") << ")\n";
++}
++
++bool PinnedMapper::MapWithPins(CGRA *cgra, DFG *dfg)
++{
++	if (!loadPins())
++	{
++		writeReport(false, cgra);
++		return false;
++	}
++
++	bool ok = PathFinderMapper::Map(cgra, dfg);
++	writeReport(ok, cgra);
++	return ok;
++}
++
++} /* namespace CGRAXMLCompile */

@@ -241,6 +241,15 @@ public:
 	bool estimateRouting(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes, DFGNode **failedNode);
 	bool Route(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes, DFGNode **failedNode);
 
+	// 基类在 estimateRouting() 成功之后、Route() 之前调用；返回 false 表示
+	// 放弃这个节点（候选队列按当前状态处理）。默认实现什么都不做。
+	virtual bool restrictDestinations(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes)
+	{
+		(void)node; (void)estimatedRoutes;
+		return true;
+	}
+	std::string lastRestrictError;
+
 	void assignPath(DFGNode *src, DFGNode *dest, std::vector<LatPort> path);
 	bool dataPathCheck(DataPath *dp, DFGNode *node);
 

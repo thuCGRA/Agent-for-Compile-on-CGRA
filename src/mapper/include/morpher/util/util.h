@@ -44,6 +44,10 @@ struct arguments
 	int mapping_method = 0; // 0: PathFinderMapper, 1: SAMapper (SimulatedAnnealing),  HeuristicMapper will not be used
 	int max_II = 32;
 	std::string arch_name = "";
+	// 钉住放置：pins_file 为空时 PinnedMapper 退化成普通 PathFinder
+	std::string pins_file = "";
+	int pins_mode = 1; // 1=strict, 2=repair
+	std::string report_file = "";
 	lisa_arguments lisa_arg;
 };
 
@@ -139,6 +143,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
 		.add_option<int>("", "--max_II", "max II", 32)
 		.add_option<std::string>("", "--arch_name", "architecture name", "")
 		.add_option<bool>("", "--lisa_training", "lisa training", false)
+		.add_option<std::string>("", "--pins", "placement pins json (node/x/y/t)", "")
+		.add_option<int>("", "--pins_mode", "1=strict, 2=repair", 1)
+		.add_option<std::string>("", "--report", "machine readable result json", "")
 		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
         .parse(argn, argc);
 
@@ -159,6 +166,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
 	ret.arch_name = args.get_option<std::string>("--arch_name");
 	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");
 	lisa_arg.training = args.get_option<bool>("--lisa_training");
+	ret.pins_file = args.get_option<std::string>("--pins");
+	ret.pins_mode = args.get_option<int>("--pins_mode");
+	ret.report_file = args.get_option<std::string>("--report");
 	lisa_arg.dfg_id = args.get_option<std::string>("--dfg_id");
 	ret.lisa_arg = lisa_arg;
 	assert(ret.dfg_filename!= "");
