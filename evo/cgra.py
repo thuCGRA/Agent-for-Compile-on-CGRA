@@ -54,6 +54,7 @@ def parse_dfg(path):
             "parents": [],
             "children": [],
             "nextiter": False,
+            "asap": int(attrs.get("ASAP", "0") or 0),
         }
         for im in _IN_RE.finditer(rest):
             p = int(im.group(1))
@@ -151,6 +152,26 @@ def parse_arch(path):
     }
 
 
+def _rec_min_ii(nodes, edges):
+    """循环携带依赖给出的 II 下界，定义与 morpher 完全一致。
+
+    抄自 `src/mapper/src/mapper/HeuristicMapper.cpp:2002-2039`：
+    对每条边 (p -> c)，若 `asap[c] <= asap[p]` 就当作反向边，
+    取 `asap[p] - asap[c] + 1` 作为它的 II 下界，全部取最大。
+    这个值不参与调度，只用来给 II 搜索定起点
+    （`CGRA_xml_compiler.cpp:103` 的 `II = max(ResMin, RecMin, UserII)`）。
+
+    我们复现它，是为了让 evo 的适应度知道"II 不可能小于几"——
+    实测三个 kernel 都是 4，之前把 II=3 当目标是在追一个不存在的解。
+    """
+    asap = {n["idx"]: int(n.get("asap") or 0) for n in nodes}
+    rec = 0
+    for p, c, _npb in edges:
+        if p in asap and c in asap and asap[c] <= asap[p]:
+            rec = max(rec, asap[p] - asap[c] + 1)
+    return rec
+
+
 def build_problem(kernel, dfg_path, arch_path, ii):
     """组装一个可直接喂给演化程序的 dict（全部是内建类型）。"""
     nodes, edges = parse_dfg(dfg_path)
@@ -176,6 +197,7 @@ def build_problem(kernel, dfg_path, arch_path, ii):
             "var": n["var"],
             "is_mem": n["op"] in MEMORY_OPS,
             "lat": lat(n["op"], n["op"] in MEMORY_OPS),
+            "asap": n.get("asap") or 0,
         })
 
     hist = {}
@@ -193,6 +215,7 @@ def build_problem(kernel, dfg_path, arch_path, ii):
             cap = 1
         res_ii = max(res_ii, -(-cnt // max(1, cap)))
     res_ii = max(res_ii, -(-len(node_list) // max(1, len(arch["pe_alu"]))))
+    rec_ii = _rec_min_ii(node_list, edges)
 
     return {
         "kernel": kernel,
@@ -205,9 +228,12 @@ def build_problem(kernel, dfg_path, arch_path, ii):
         "mem_ops": sorted(arch["mem_ops"]),
         "alu_lat": arch["alu_lat"],
         "mem_lat": arch["mem_lat"],
+        "alu_lat_map": dict(arch["alu_ops"]),
+        "mem_lat_map": dict(arch["mem_ops"]),
         "var_bank": arch["var_bank"],
         "bank_vars": {str(k): v for k, v in arch["bank_vars"].items()},
         "res_min_ii": res_ii,
+        "rec_min_ii": rec_ii,
         "n_nodes": len(node_list),
         "nodes": node_list,
         "edges": [[p, c, ni] for p, c, ni in edges],

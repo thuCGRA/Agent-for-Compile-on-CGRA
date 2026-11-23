@@ -32,6 +32,12 @@ def check(prob, place, ii=None):
     ii = int(ii or prob["ii"])
     if ii <= 0:
         return {"ok": False, "errors": ["II must be positive"], "cost": 0.0, "stats": {}}
+    # 循环携带依赖决定的下界：比它小的 II 不存在可行调度，不必再往下算。
+    rec_ii = int(prob.get("rec_min_ii") or 1)
+    if ii < rec_ii:
+        return {"ok": False,
+                "errors": ["II=%d below RecMinII=%d (loop-carried dependence)" % (ii, rec_ii)],
+                "cost": 0.0, "stats": {}}
 
     pins = {}
     try:
@@ -51,11 +57,32 @@ def check(prob, place, ii=None):
         return {"ok": False, "errors": ["malformed placement: %r" % (e,)],
                 "cost": 0.0, "stats": {}}
 
+    # 允许传绝对调度时刻（morpher 的 mappingwithlatency.txt 就是绝对拍），
+    # 统一折算到 [0, ii) 的相位。负值保留给"未指定相位"。
+    pins = {i: (x, y, (t % ii) if t >= 0 else t) for i, (x, y, t) in pins.items()}
+
     nodes = {n["idx"]: n for n in prob["nodes"]}
     xdim, ydim = prob["xdim"], prob["ydim"]
     alu_ops = set(prob["alu_ops"])
     mem_ops = set(prob["mem_ops"])
     pe_mem = {tuple(p) for p in prob["pe_mem"]}
+
+    alu_lat = prob.get("alu_lat_map") or {}
+    mem_lat = prob.get("mem_lat_map") or {}
+    alu_lat_default = prob.get("alu_lat") or 1
+    mem_lat_default = prob.get("mem_lat") or 1
+
+    def _lat_of(idx):
+        """父节点自己的延迟：落在 PE_MEM 上取 FU_MEM 的表，否则取 FU 的表。
+
+        同一个算子在两张表里延迟不同（FU=1、FU_MEM=2），所以延迟取决于父节点
+        实际落在哪类 PE，不能按算子名一刀切。
+        """
+        px, py, _pt = pins[idx]
+        op = nodes[idx]["op"]
+        if (px, py) in pe_mem:
+            return mem_lat.get(op) or alu_lat.get(op) or mem_lat_default
+        return alu_lat.get(op) or mem_lat.get(op) or alu_lat_default
 
     errors = []
     if len(pins) != len(nodes):
@@ -79,18 +106,17 @@ def check(prob, place, ii=None):
             errors.append("node %d phase %d outside [0,%d)" % (idx, t, ii))
             continue
         is_mem_pe = (x, y) in pe_mem
-        # 只有真正访问存储器的算子被钉在 PE_MEM 上（它有 MEMPORT 连到 SPM）；
-        # CMERGE/MOVC/OLOAD 这类在 FU 里就有，算术 PE 也能放。
-        if n.get("is_mem"):
-            if not is_mem_pe:
-                errors.append("node %d (%s) must sit on a PE_MEM, got (%d,%d)" % (idx, op, x, y))
-            elif op not in mem_ops:
-                errors.append("node %d op %s not in FU_MEM" % (idx, op))
-        else:
-            if is_mem_pe:
-                errors.append("node %d (%s) cannot sit on a PE_MEM (%d,%d)" % (idx, op, x, y))
-            elif op not in alu_ops:
-                errors.append("node %d op %s not in FU" % (idx, op))
+        # 按坐标上的 FU 表判：PE_MEM 跑 FU_MEM，其余跑 FU。
+        # LOAD/STORE 这类只出现在 FU_MEM 里，必须落 PE_MEM；
+        # ADD/OSTORE/MOVC/SELECT 这类两边都有，放哪边都合法（延迟不同，见 _lat_of）。
+        table = mem_ops if is_mem_pe else alu_ops
+        if op not in table:
+            if op in mem_ops:
+                errors.append("node %d (%s) must sit on a PE_MEM, got (%d,%d)"
+                              % (idx, op, x, y))
+            else:
+                errors.append("node %d op %s not in %s"
+                              % (idx, op, "FU_MEM" if is_mem_pe else "FU"))
         key = (x, y, t)
         if key in slots:
             errors.append("node %d and %d share (x=%d,y=%d,t=%d)" % (slots[key], idx, x, y, t))
@@ -123,7 +149,7 @@ def check(prob, place, ii=None):
                 for k, p in enumerate(plist[:2]):
                     a = (tc - ((k + shift) % 2)) % ii
                     d = _manhattan(pins[p], pins[c])
-                    h = _hops(d, pins[p][2], nodes[p]["lat"] or 1, a, ii)
+                    h = _hops(d, pins[p][2], _lat_of(p), a, ii)
                     total += h - d
                     plan.append((p, a, h, d))
                 if best is None or total < best[0]:
@@ -133,13 +159,13 @@ def check(prob, place, ii=None):
             # 第 3 个及以后的父节点（谓词等）按普通边处理
             for p in plist[2:]:
                 d = _manhattan(pins[p], pins[c])
-                h = _hops(d, pins[p][2], nodes[p]["lat"] or 1, tc, ii)
+                h = _hops(d, pins[p][2], _lat_of(p), tc, ii)
                 plan.append((p, tc, h, d))
         else:
             plan = []
             for p in plist:
                 d = _manhattan(pins[p], pins[c])
-                h = _hops(d, pins[p][2], nodes[p]["lat"] or 1, tc, ii)
+                h = _hops(d, pins[p][2], _lat_of(p), tc, ii)
                 plan.append((p, tc, h, d))
         for (p, a, h, d) in plan:
             detour += h - d

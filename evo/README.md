@@ -49,38 +49,67 @@ def place(prob, ii) -> {node_idx: (x, y, t)}
 
 `prob` 是从 `out/<kernel>/{dfg.xml,arch.json}` 解析出来的只读视图：
 节点表（`idx/op/parents/children/const/var/is_mem/lat`）、边表、
-`pe_mem`/`pe_alu` 坐标、`xdim/ydim`、`var_bank`（变量 → bank）、算子延迟表。
+`pe_mem`/`pe_alu` 坐标、`xdim/ydim`、`var_bank`（变量 → bank）、算子延迟表、
+以及 `tight`/`loose`/`rec_min_ii` 三个 II 参数。
 
-`check.py` 判两件事：
+### 两档 II：紧档 = RecMinII，松档 = 紧档 + 1
 
-1. **硬约束**（违反即 0 分）：每个节点恰好一个位置、`(x,y,t)` 不重复、
-   越界、访存算子必须落在 `pe_mem` 而算术算子必须落在 `pe_alu`。
-2. **相位与绕路**：一条边 `p→c`，父节点第 `t_p` 拍出结果，经 `lat_p` 拍延迟和
-   `h` 跳传输，必须在子节点执行的那一拍到达；`h` 还要满足
-   `h ≡ (到达相位 - t_p - lat_p) (mod II)` 且 `h >= 曼哈顿距离`。
-   多出来的 `h - 曼哈顿距离` 就是**绕路**，越少越好。
-   SELECT / CMERGE 有两个操作数，两条父边必须落在 `t` 和 `t-1` 两拍
-   （否则功能单元拿不到两个操作数——这是 HyCUBE 的真实限制，
-   morpher 的模拟器会在这上面断言）。
+三个 kernel 的 **RecMinII 都是 4**（实测 `scripts/map.sh <k> 0 3`，morpher 打印
+`Initial target II = 4 (ResMin II = 2 , RecMin II = 4, UserGiven II = 3 )`）。
+RecMinII 的定义照抄 `src/mapper/src/mapper/HeuristicMapper.cpp:2002`
+的 `getRecMinimumII()`：对所有 `child->ASAP <= node->ASAP` 的反向边取
+`node->ASAP - child->ASAP + 1` 的最大值。
 
-分数：
+所以「II=3 冲刺目标」是**不存在的**（早期版本给了它 40% 权重，等于让 LLM 花四成
+力气追不可达解）。现在是 `tight = max(rec_min_ii, 1)`、`loose = tight + 1`。
+
+### 合法 = 静态约束过 **且** 真的布得出来
+
+`check.py` 判静态部分（便宜）：
+
+1. **硬约束**：每个节点恰好一个位置、`(x,y,t)` 不重复、越界、
+   `ii >= rec_min_ii`、算子必须在其所在 PE 类型的算子表里。
+   注意 ALU 与 PE_MEM **都能做算术**（`FU` 28 ops、`FU_MEM` 35 ops，后者只多
+   7 个纯访存算子），差别只在延迟（ALU 1 拍、PE_MEM 2 拍）。
+2. **相位与绕路**：一条边 `p→c` 的跳数 `h` 必须满足
+   `h ≡ (t_c - t_p - lat_p) (mod ii)` 且 `h >= 曼哈顿距离`。
+   SELECT / CMERGE 的两条父边必须落在 `t` 和 `t-1` 两拍
+   （HyCUBE 的 FU 一拍只能收一个操作数，morpher 模拟器会在这上面断言）。
+
+`router.py` 判动态部分（时间扩展图上的真布线）：每个单元 `(x,y)`、每条链路每个相位
+只能过一个值，传输途中允许在 PE 寄存器里原地等拍（等拍不占链路）。
+`route(prob, place, ii)` 返回 `{ok, unrouted, detour, hops_total}`。
+
+**为什么必须接 router**：同一份 II=4 放置，静态分说基线处处更好，router 说
+`array_add` 根本布不出来。
+
+| kernel | morpher 真解 | 贪心基线 `init.py` |
+|---|---|---|
+| array_add | 可布 detour=38 | **不可布**（静态 cost 12） |
+| mac | 可布 detour=48 | 可布 detour=45 |
+| trmm | 可布 detour=20 | 可布 detour=15 |
+
+### 分数
 
 ```
-score_kernel = 0.6 / (1 + cost_ii4 / 20) + 0.4 / (1 + cost_ii3 / 20)   # 只有合法才计分
-combined_score = mean(score_kernel)   over {array_add, mac, trmm}
-cost = 绕路总跳数 + 3 × 端口超额（同一 PE 同一拍进入超过 4 条边）
+per_kernel = 0.85 / (1 + detour_at_tight / 20)   # 仅当紧档"合法且可布"
+           + 0.15                                # 仅当松档也合法
+combined_score = mean(per_kernel over {array_add, mac, trmm})
+validity       = 紧档可布的内核数 / 3
 ```
 
-基线 `init.py`（拓扑序 + 深度定列 + bank 定行 + 相位贪心）得 **0.6012**，三个 kernel
-在 II=4 和 II=3 上都合法。所以 0.60 是"起点"，1.0 是上界。
+`detour_at_tight` 是紧档下所有边绕路跳数之和（真实布线走出来，不是下界）。
 
-> **必须知道的局限**：`cost` 是**绕路的静态下界**，不是真实布线结果。
-> `check.py` 说合法，不等于 morpher 的 PathFinder 一定布得出来。
-> 在 `~/cac` 的实测里，纯静态判据与真实仿真的分歧率很高（mapper 说 OK 但仿真
-> 失配的格子占 88%）。所以这里的分数只能用来**排序候选**，
-> 真结论必须回到 `scripts/map.sh` + `scripts/sim.sh` 验证。
-> 把 `check.py` 换成真实路由器（时间扩展网络 + rip-up & retry）是下一版的事。
+基线 `init.py` 得 **0.399084**，`validity = 0.667`（array_add 在 II=4 布不出来，
+只拿到松档的 0.15）。把 morpher 自己的解当作"程序"来评分是 **0.322701**、
+`validity = 1.0` —— 它三个都布得出来但绕路更多。
 
+> **还剩下的局限**：`router.py` 是**我们自己的**布线器，不是 morpher 的 PathFinder，
+> 也不是模拟器。它能回答"这个放置在这个抽象模型下布不布得出来"，但
+> **不能代替 `scripts/sim.sh` 的功能验证**（数值对不对只有仿真器知道）。
+> 拿进化出的最优解跑一遍 `map.sh` + `sim.sh` 仍然必须有。
+
+## 四、环境
 ## 四、环境
 
 伐谋要求 Python ≥ 3.12，acc-thu 的 `cgra-tc`/`cgra` 都不满足，所以单开一个环境：

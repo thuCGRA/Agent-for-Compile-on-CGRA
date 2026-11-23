@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""把 morpher 自己布出来的解代回 check.py，看静态适应度和真解是否同一量级。
+"""把 morpher 自己布出来的解放进 check.py，看静态判据和真解是否同一量级。
 
-用途：evo 的适应度只是绕路的静态下界，必须证明它没有离谱。
-如果 mapper 的真实解在 check.py 下也是"合法 + 低 cost"，
-那 check.py 至少是一个可信的排序器；如果真解被判非法，
-说明 check.py 的模型和 morpher 的约束不一致，分数不可用。
+这是 evo 适应度的**校准实验**：如果连 morpher 的真实解在 check.py 下都不合法，
+那说明静态模型和硬件约束对不上，分数不能用来排序候选。
+
+数据来源（按可靠性排序）：
+  1. `*.routeInfo.log` 里的 `node=<idx>,mapped=PE[_MEM]_X<x>_Y<y>-T<t>`
+     —— 唯一在三个 kernel 上都非空的完整放置记录；
+  2. `*.mappingwithlatency.txt` 的 `node,x,y,t` —— 常常是 0 字节，只能当兜底。
+
+注意 t 是**绝对调度时刻**，check.py 内部会折成 mod II 的相位。
+比较只在解本身被求出的那个 II 上做：把 II=4 的解折到 II=3 必然撞槽位，
+那不是判据错，是问题变了。
 
 用法：
     python3 evo/verify_against_mapper.py [kernel ...]
@@ -16,100 +23,95 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from evo import cgra, check, harness
+from evo import check, harness
 
-# mapping.csv 的行形如：
-#   current node = 11,op = LOADB,unmapped nodes = 19,...
-# 以及放置行（不同 morpher 版本格式略有差异，这里只认带坐标的行）
-NODE_RE = re.compile(r"current node\s*=\s*(\d+)")
-PLACE_RE = re.compile(
-    r"node\s*[=:]\s*(\d+).*?(?:x|X)\s*[=:]\s*(\d+).*?(?:y|Y)\s*[=:]\s*(\d+).*?"
-    r"(?:t|T)\s*[=:]\s*(\d+)"
-)
+# 两种写法：ALU 是 `PE_X1|_Y2|-T2`，PE_MEM 是 `PE_MEM_X0_Y2-T0`，
+# 差别只在 y 后面那个分隔符是 `|` 还是空。
+ROUTE_RE = re.compile(r"node=(\d+),mapped=PE(?:_MEM)?_X(\d+)\|?_Y(\d+)\|?-T(\d+)")
+TXT_RE = re.compile(r"^(\d+),(\d+),(\d+),(\d+)$")
 
 
-def parse_mapping_csv(path):
-    """从 mapper 的 mapping.csv 里抽 (node -> (x, y, t))。
-
-    优先用 mappingwithlatency.txt（每行 node,x,y,t），它最干净；
-    mapping.csv 作为兜底。
-    """
+def parse_route_log(path):
     place = {}
     with open(path, "r", errors="replace") as fh:
         for line in fh:
-            m = PLACE_RE.search(line)
+            m = ROUTE_RE.search(line)
             if m:
                 place[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
     return place
 
 
-def parse_mapping_txt(path):
-    """mappingwithlatency.txt：每行 `node,x,y,t`。"""
+def parse_latency_txt(path):
     place = {}
     with open(path, "r", errors="replace") as fh:
         for line in fh:
-            parts = line.strip().split(",")
-            if len(parts) != 4:
-                continue
-            try:
-                n, x, y, t = (int(p) for p in parts)
-            except ValueError:
-                continue
-            place[n] = (x, y, t)
+            m = TXT_RE.match(line.strip())
+            if m:
+                place[int(m.group(1))] = (int(m.group(2)), int(m.group(3)), int(m.group(4)))
     return place
 
 
-def find_mapping(kernel):
-    """在 out/<kernel>/m*/ 下找 mapper 产出的解。"""
+def find_solution(kernel, valid_ids):
+    """在 out/<kernel>/m*/ 下找 mapper 的放置，返回 (place, ii, source)。"""
     kdir = os.path.join(harness.root_dir(), "out", kernel)
     if not os.path.isdir(kdir):
-        return None, None
+        return None, None, None
+    best = (None, None, None)
     for sub in sorted(os.listdir(kdir)):
         d = os.path.join(kdir, sub)
         if not os.path.isdir(d) or not sub.startswith("m"):
             continue
+        ii = None
+        res = os.path.join(d, "result.txt")
+        if os.path.isfile(res):
+            parts = open(res, errors="replace").read().split()
+            for p in parts:
+                if p.isdigit():
+                    ii = int(p)
+                    break
         for name in sorted(os.listdir(d)):
-            if name.endswith(".mappingwithlatency.txt"):
-                place = parse_mapping_txt(os.path.join(d, name))
-                if place:
-                    return place, os.path.join(d, name)
-        for name in sorted(os.listdir(d)):
-            if name.endswith(".mapping.csv"):
-                place = parse_mapping_csv(os.path.join(d, name))
-                if place:
-                    return place, os.path.join(d, name)
-    return None, None
+            path = os.path.join(d, name)
+            place = {}
+            if name.endswith(".routeInfo.log"):
+                place = parse_route_log(path)
+            elif name.endswith(".mappingwithlatency.txt"):
+                place = parse_latency_txt(path)
+            # 路由日志里混着内部节点，只留 DFG 里真的有的 idx
+            place = {k: v for k, v in place.items() if k in valid_ids}
+            if len(place) == len(valid_ids):
+                return place, ii or 4, os.path.join(sub, name)
+            if place and best[0] is None:
+                best = (place, ii or 4, os.path.join(sub, name))
+    return best
 
 
 def main(argv):
     kernels = argv[1:] or list(harness.KERNELS)
     probs = harness.load_problems(kernels)
-    print(f"{'kernel':<12} {'nodes':>5} {'mapper':>7} {'legal4':>7} {'cost4':>7} "
-          f"{'legal3':>7} {'cost3':>7}  source")
-    print("-" * 92)
+    print(f"{'kernel':<11} {'nodes':>5} {'found':>5} {'II':>3} {'legal':>6} {'cost':>7}  source")
+    print("-" * 78)
+    ok_cnt = 0
     for k in kernels:
         prob = probs.get(k)
         if prob is None:
-            print(f"{k:<12} (no dfg/arch in out/)")
+            print(f"{k:<11}  (no out/{k}/dfg.xml)")
             continue
-        place, src = find_mapping(k)
         n = len(prob["nodes"])
+        valid = {x["idx"] for x in prob["nodes"]}
+        place, ii, src = find_solution(k, valid)
         if not place:
-            print(f"{k:<12} {n:>5} {'-':>7} {'-':>7} {'-':>7} {'-':>7} {'-':>7}  no mapping artifact")
+            print(f"{k:<11} {n:>5} {'-':>5} {'-':>3} {'-':>6} {'-':>7}  no artifact")
             continue
-        # mapper 的解里 t 是绝对相位（可能 >= II），check.py 用模 II
-        r4 = check.check(prob, place, ii=harness.II_BASE)
-        r3 = check.check(prob, place, ii=harness.II_TARGET)
-        print(f"{k:<12} {n:>5} {len(place):>7} "
-              f"{str(r4['ok']):>7} {r4['cost']:>7.1f} "
-              f"{str(r3['ok']):>7} {r3['cost']:>7.1f}  {os.path.basename(os.path.dirname(src))}")
-        if not r4["ok"]:
-            for e in r4["errors"][:3]:
-                print(f"    ii4 error: {e}")
-        if not r3["ok"]:
-            for e in r3["errors"][:3]:
-                print(f"    ii3 error: {e}")
-    return 0
+        r = check.check(prob, place, ii=ii)
+        if r["ok"]:
+            ok_cnt += 1
+        print(f"{k:<11} {n:>5} {len(place):>5} {ii:>3} {str(r['ok']):>6} "
+              f"{r['cost']:>7.1f}  {src}")
+        for e in r["errors"][:4]:
+            print(f"    error: {e}")
+    print("-" * 78)
+    print(f"morpher 的真实解被 check.py 判为合法: {ok_cnt}/{len(kernels)}")
+    return 0 if ok_cnt == len(kernels) else 1
 
 
 if __name__ == "__main__":
