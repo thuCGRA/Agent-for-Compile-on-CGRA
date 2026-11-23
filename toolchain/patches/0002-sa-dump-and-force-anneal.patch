@@ -1,0 +1,254 @@
+diff --git a/include/morpher/mapper/SimulatedAnnealingMapper.h b/include/morpher/mapper/SimulatedAnnealingMapper.h
+index 0cbe012..976e827 100644
+--- a/include/morpher/mapper/SimulatedAnnealingMapper.h
++++ b/include/morpher/mapper/SimulatedAnnealingMapper.h
+@@ -32,6 +32,28 @@ public:
+ 
+ 	bool SAMap(CGRA *cgra, DFG *dfg);
+ 
++	// false = 上游行为：热启动（initMap 的 PathFinder 式放置）只要合法就 return，
++	// 退火循环一次都不跑。true = 忽略热启动的合法性，真的退火。
++	bool forceAnneal = false;
++
++	// 把当前 dfg_node_placement 落盘（mapping.csv / routeInfo.log / mappingwithlatency.txt）。
++	// 上游只在 HeuristicMapper::Map() 的成功路径里写这些文件，SAMap() 不经过那段，
++	// 所以 SA 的产物一直是 0 字节。
++	void dumpSAMapping();
++
++	// acc-thu: 可行之后继续退火。上游把 isCurrMappingValid() 同时当停止条件与
++	// 接受条件，第一次可行就 return，于是 SA 从来没做过优化。
++	bool optimizeAfterFeasible = false;
++	int moveBudget = 0; // 0 = 不限
++	int movesDone = 0;
++	bool budgetExhausted = false;
++	bool haveBest = false;
++	int bestCost = 0;
++	std::map<DFGNode *, std::pair<DataPath *, int>> best_placement;
++	std::map<dfg_data, std::vector<LatPort>> best_routing;
++	void considerBest();
++	bool restoreBestSnapshot();
++
+ 	bool initMap();
+ 	bool Route(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes, DFGNode **failedNode);
+ 
+diff --git a/include/morpher/util/util.h b/include/morpher/util/util.h
+index 6e6fde2..acdaadc 100644
+--- a/include/morpher/util/util.h
++++ b/include/morpher/util/util.h
+@@ -43,6 +43,13 @@ struct arguments
+ 	int max_hops = 4;  // for HyCUBE
+ 	int mapping_method = 0; // 0: PathFinderMapper, 1: SAMapper (SimulatedAnnealing),  HeuristicMapper will not be used
+ 	int max_II = 32;
++	// acc-thu: SA 只要热启动合法就直接 return，退火从不运行。置 true 强制退火。
++	bool sa_force_anneal = false;
++	// 上游 SA 把 isCurrMappingValid() 同时当停止条件和接受条件：一旦可行就立刻
++	// 返回，所以它只是个可行性搜索器，从不优化。置 true 让它在可行之后继续退火，
++	// 最后回滚到代价最小的那个可行快照。
++	bool sa_optimize = false;
++	int sa_budget = 0; // 移动次数上限，0 = 不限（上游行为）
+ 	std::string arch_name = "";
+ 	lisa_arguments lisa_arg;
+ };
+@@ -137,6 +144,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
+ 		.add_option<bool>("-e", "--noMutexPaths", "noMutexPaths", false)
+ 		.add_option<int>("-b", "--backtrack_limit", "back track limit", 0)
+ 		.add_option<int>("", "--max_II", "max II", 32)
++		.add_option<bool>("", "--sa_force_anneal", "SA: anneal even if the PathFinder warm start is already valid", false)
++		.add_option<bool>("", "--sa_optimize", "SA: keep annealing after feasibility and return the cheapest valid snapshot", false)
++		.add_option<int>("", "--sa_budget", "SA: max number of moves (0 = unlimited)", 0)
+ 		.add_option<std::string>("", "--arch_name", "architecture name", "")
+ 		.add_option<bool>("", "--lisa_training", "lisa training", false)
+ 		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
+@@ -155,6 +165,9 @@ inline arguments parse_arguments(int argn, char *argc[]){
+ 	ret.max_hops =  args.get_option<int>("--hops");
+ 	ret.mapping_method = args.get_option<int>("--mapping");
+ 	ret.max_II = args.get_option<int>("--max_II");
++	ret.sa_force_anneal = args.get_option<bool>("--sa_force_anneal");
++	ret.sa_optimize = args.get_option<bool>("--sa_optimize");
++	ret.sa_budget = args.get_option<int>("--sa_budget");
+ 	ret.use_json = true;
+ 	ret.arch_name = args.get_option<std::string>("--arch_name");
+ 	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");
+diff --git a/src/CGRA_xml_compiler.cpp b/src/CGRA_xml_compiler.cpp
+index ab5e4f1..e2d6cc6 100644
+--- a/src/CGRA_xml_compiler.cpp
++++ b/src/CGRA_xml_compiler.cpp
+@@ -88,6 +88,9 @@ int main(int argn, char *argc[])
+ 		mapper = new PathFinderMapper(inputDFG_filename);
+ 	}else if(mapping_method  == 1){
+ 		mapper = new SAMapper(inputDFG_filename);
++		static_cast<SAMapper *>(mapper)->forceAnneal = args.sa_force_anneal;
++		static_cast<SAMapper *>(mapper)->optimizeAfterFeasible = args.sa_optimize;
++		static_cast<SAMapper *>(mapper)->moveBudget = args.sa_budget;
+ 		
+ 		// assert(false && "convert to SA");
+ 	}else if(mapping_method  == 2){
+diff --git a/src/mapper/SimulatedAnnealingMapper.cpp b/src/mapper/SimulatedAnnealingMapper.cpp
+index 55dd82b..8db77e0 100644
+--- a/src/mapper/SimulatedAnnealingMapper.cpp
++++ b/src/mapper/SimulatedAnnealingMapper.cpp
+@@ -121,8 +121,15 @@ bool CGRAXMLCompile::SAMapper::SAMap(CGRA *cgra, DFG *dfg)
+ 	if (unmapped_node_numer == 0 && overuse_number == 0)
+ 	{
+ 		LOG(SA_) << "find a valid initial mapping, exit....II =" << this->cgra->get_t_max() << "\n";
+-		return true;
++		if (!forceAnneal)
++		{
++			dumpSAMapping();
++			return true;
++		}
++		LOG(SA_) << "forceAnneal: warm start is valid but annealing anyway\n";
+ 	}
++	// 热启动本身就可能可行，先记下来；即使后面退火把解弄坏，也有东西可回滚。
++	considerBest();
+ 
+ 
+ 	//start Simulated Annealing mapping
+@@ -132,7 +139,7 @@ bool CGRAXMLCompile::SAMapper::SAMap(CGRA *cgra, DFG *dfg)
+ 
+ 	LOG(SA_)<<"###############current mapping: \n"<<dumpMappingToStr();
+ 
+-	while (curr_temp > minimim_temp)
++	while (curr_temp > minimim_temp && !budgetExhausted)
+ 	{
+ 		LOG(SA_) << "*******************************current temperature:" << curr_temp << "\n";
+ 		float accept_rate = inner_map();
+@@ -153,14 +160,112 @@ bool CGRAXMLCompile::SAMapper::SAMap(CGRA *cgra, DFG *dfg)
+ 
+ 		curr_temp = updateTemperature(curr_temp, accept_rate);
+ 
+-		if (isCurrMappingValid())
++		// 第三处早退：可行即跳出温度循环。--sa_optimize 必须关掉它，
++		// 否则退火只跑完"变可行"的那一个温度，等于没退火。
++		if (!optimizeAfterFeasible && isCurrMappingValid())
+ 		{
+ 			LOG(SA_) << "find a valid mapping, exit...II =" << this->cgra->get_t_max() << "\n";
+ 			break;
+ 		}
+ 	}
+ 
+-	return isCurrMappingValid();
++	bool ok = false;
++	if (haveBest)
++	{
++		restoreBestSnapshot();
++		LOG(SA_) << "restore best snapshot, cost=" << bestCost << "\n";
++		ok = isCurrMappingValid();
++	}
++	else
++	{
++		ok = isCurrMappingValid();
++	}
++	if (ok)
++	{
++		dumpSAMapping();
++	}
++	else
++	{
++		mappingLog << "Map Failed!.\n";
++		mappingLog.close();
++		mappingLog2.close();
++		mappingLog4.close();
++	}
++	return ok;
++}
++
++// 上游 SA 从不写放置产物：printMappingLog/printMappingLog2 只在
++// HeuristicMapper::Map() 的成功路径调用，而 SA 走的是 SAMap()。
++// 这里补上同样的收尾，另外写 mappingwithlatency.txt（第 4 列是绝对时刻，
++// routeInfo.log 里的 -T 只是相位，两者 %II 后等价）。
++// 只在可行时记录快照，且只保留代价最小的那个。
++// getCost() = unmapped*100 + congestion*10 + conflict*10 + port_usage
++void CGRAXMLCompile::SAMapper::considerBest()
++{
++	if (!isCurrMappingValid())
++	{
++		return;
++	}
++	int c = getCost();
++	if (haveBest && c >= bestCost)
++	{
++		return;
++	}
++	bestCost = c;
++	best_placement = dfg_node_placement;
++	best_routing = data_routing_path;
++	haveBest = true;
++	LOG(SA_) << "new best cost=" << bestCost << " at move " << movesDone << "\n";
++}
++
++bool CGRAXMLCompile::SAMapper::restoreBestSnapshot()
++{
++	if (!haveBest)
++	{
++		return false;
++	}
++	for (DFGNode *node : sortedNodeList)
++	{
++		clearNodeMapping(node);
++	}
++	// 先全部放置，再全部布线：assignPath 需要两端 rootDP 都已就位。
++	for (DFGNode *node : sortedNodeList)
++	{
++		auto it = best_placement.find(node);
++		if (it == best_placement.end())
++		{
++			continue;
++		}
++		it->second.first->assignNode(node, it->second.second, this->dfg);
++		node->rootDP = it->second.first;
++	}
++	for (auto &kv : best_routing)
++	{
++		assignPath(kv.first.first, kv.first.second, kv.second);
++	}
++	dfg_node_placement = best_placement;
++	data_routing_path = best_routing;
++	return true;
++}
++
++void CGRAXMLCompile::SAMapper::dumpSAMapping()
++{
++	mappingLog << "Map Success!.\n";
++	mappingLog2 << "Map Success!.\n";
++	this->printMappingLog();
++	this->printMappingLog2();
++	for (DFGNode *node : sortedNodeList)
++	{
++		if (node->rootDP == NULL)
++		{
++			continue;
++		}
++		mappingLog4 << node->idx << "," << node->rootDP->getPE()->X << ","
++					<< node->rootDP->getPE()->Y << "," << node->rootDP->getLat() << "\n";
++	}
++	mappingLog.close();
++	mappingLog2.close();
++	mappingLog4.close();
+ }
+ 
+ bool CGRAXMLCompile::SAMapper::initMap()
+@@ -270,6 +375,12 @@ float CGRAXMLCompile::SAMapper::inner_map()
+ 
+ 	for (int i = 0; i < movement_in_each_temp; i++)
+ 	{
++		if (moveBudget > 0 && movesDone >= moveBudget)
++		{
++			budgetExhausted = true;
++			break;
++		}
++		movesDone++;
+ 		std::stringstream congestion_detail;
+ 		LOG(SA) << "************ NO." << i << " movement, unmapped nodes:" << getNumberOfUnmappedNodes() << ", congestion:" << getCongestionNumber(congestion_detail) 
+ 			<< ", congestion:" << getConflictNumber(congestion_detail);
+@@ -382,8 +493,8 @@ float CGRAXMLCompile::SAMapper::inner_map()
+ 			old_dfg_node_placement.clear();
+ 			old_data_routing_path.clear();
+ 
+-			// printHyCUBEBinary(this->cgra);
+-			if (isCurrMappingValid())
++			considerBest();
++			if (!optimizeAfterFeasible && isCurrMappingValid())
+ 			{
+ 				std::cout << "find a valid mapping, exit inner_map....\n";
+ 				return (float(accepted_number)) / movement_in_each_temp;

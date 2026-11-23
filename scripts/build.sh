@@ -36,11 +36,19 @@ printf '#!/usr/bin/env bash\nexec "%s/bin/clang" --driver-mode=g++ "$@"\n' "$CON
 chmod +x "$CX"
 
 # 只在必要处改上游源码，且全部以 patch 形式留下痕迹（可复现、可审）
+# 幂等：先用反向 dry-run 判断"这个 patch 是否已经在了"。
+# 不能只靠 marker 文件 —— 0001 的效果已经进了 git 历史（新 clone 里源码本身就是
+# 打过的），marker 不存在，直接 patch -N 会因为"Reversed (or previously applied)
+# patch detected" 返回 1，让整次构建失败。
 apply_patch() {
   local dir="$1" p="$2"
   local marker="$dir/.$(basename "$p").applied"
   [ -f "$p" ] || { echo "  (无 patch) $p"; return 0; }
-  [ -f "$marker" ] && { echo "  已应用 $(basename "$p")"; return 0; }
+  if patch -p1 -R --dry-run -f -d "$dir" < "$p" >/dev/null 2>&1; then
+    echo "  已应用 $(basename "$p")（反向 dry-run 通过）"
+    touch "$marker"
+    return 0
+  fi
   echo "  应用 $(basename "$p")"
   ( cd "$dir" && patch -p1 -N --no-backup-if-mismatch < "$p" ) || return 1
   touch "$marker"
@@ -61,6 +69,7 @@ cp "$ROOT/build/dfggen/src/libdfggenPass.so" "$OUT/"
 
 banner "[2/3] mapper (cgra_xml_mapper)"
 apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0001-mapper-no-hardcoded-compiler.patch"
+apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0002-sa-dump-and-force-anneal.patch"
 cmake -S "$SRC/mapper" -B "$ROOT/build/mapper" -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER="$GCC" -DCMAKE_CXX_COMPILER="$GXX" \
   -DCMAKE_C_FLAGS="$HOSTFLAGS" -DCMAKE_CXX_FLAGS="$HOSTFLAGS" \

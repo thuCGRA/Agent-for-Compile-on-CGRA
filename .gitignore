@@ -1,13 +1,10 @@
-# 构建产物
 build/
 out/
-toolchain/include32/.keep
-
-# 编辑器/系统
-*.swp
-.DS_Store
+work/
 __pycache__/
 *.pyc
-
-# patch 应用标记（apply_patch 自己维护，不入库）
-*.patch.applied
+dumped_raw_data.txt
+sim_result.txt
+result.txt
+arch_verbose.json
+mem_verbose.json
