@@ -42,8 +42,20 @@ apply_patch() {
   [ -f "$p" ] || { echo "  (无 patch) $p"; return 0; }
   [ -f "$marker" ] && { echo "  已应用 $(basename "$p")"; return 0; }
   echo "  应用 $(basename "$p")"
-  ( cd "$dir" && patch -p1 -N --no-backup-if-mismatch < "$p" ) || return 1
-  touch "$marker"
+  if ( cd "$dir" && patch -p1 -N --no-backup-if-mismatch < "$p" ); then
+    touch "$marker"
+    return 0
+  fi
+  # 源码里可能已经带着这个改动了（例如 patch 已随基线提交），
+  # 此时正向 patch 会报 "Reversed (or previously applied)"。
+  # 用反向试打验证：能反向干净打上，说明改动确实已在源码里。
+  if ( cd "$dir" && patch -p1 -R --dry-run --force < "$p" >/dev/null 2>&1 ); then
+    echo "  (源码已包含该改动，跳过) $(basename "$p")"
+    find "$dir" -maxdepth 2 -name '*.rej' -delete 2>/dev/null || true
+    touch "$marker"
+    return 0
+  fi
+  return 1
 }
 
 banner "[1/3] DFG pass (libdfggenPass.so)"
