@@ -1,0 +1,104 @@
+diff -ruN snap3b/mapper/include/morpher/mapper/SimulatedAnnealingMapper.h snap4/mapper/include/morpher/mapper/SimulatedAnnealingMapper.h
+--- a/include/morpher/mapper/SimulatedAnnealingMapper.h	2026-11-23 12:57:31.687758873 +0000
++++ b/include/morpher/mapper/SimulatedAnnealingMapper.h	2026-11-23 12:57:31.751758591 +0000
+@@ -34,6 +34,11 @@
+ 
+ 	// false = 上游行为：热启动（initMap 的 PathFinder 式放置）只要合法就 return，
+ 	// 退火循环一次都不跑。true = 忽略热启动的合法性，真的退火。
++	// M1.5: SA 的随机性必须可复现。上游每个随机点都现场 new 一个
++	// std::random_device（真随机源），导致同一输入两次跑出不同映射、
++	// 甚至一次能映射一次不能。做 agent 与 SA 的对比实验前先钉住种子。
++	std::mt19937 rng{20136u};
++	void seedRng(unsigned s) { rng.seed(s); }
+ 	bool forceAnneal = false;
+ 
+ 	// 把当前 dfg_node_placement 落盘（mapping.csv / routeInfo.log / mappingwithlatency.txt）。
+@@ -131,7 +136,9 @@
+ 
+ 			float probability = exp(-(new_cost - old_cost) / temperature);
+ 
+-			return probability > ((float)rand() / (float)RAND_MAX);
++			// 上游用全局 rand()（从不 srand，实际恒定），改走 rng 以便 --sa_seed 统一控制
++			std::uniform_real_distribution<double> u01(0.0, 1.0);
++			return probability > u01(rng);
+ 	}
+ 	//	bool LeastCostPathAstar(Port* start, Port* end, DataPath* endDP, std::vector<Port*>& path, int& cost, DFGNode* node, std::map<Port*,std::set<DFGNode*>>& mutexPaths, DFGNode* currNode);
+ 
+diff -ruN snap3b/mapper/include/morpher/util/util.h snap4/mapper/include/morpher/util/util.h
+--- a/include/morpher/util/util.h	2026-11-23 12:57:31.691758855 +0000
++++ b/include/morpher/util/util.h	2026-11-23 12:57:31.751758591 +0000
+@@ -45,6 +45,7 @@
+ 	int max_II = 32;
+ 	// acc-thu: SA 只要热启动合法就直接 return，退火从不运行。置 true 强制退火。
+ 	bool sa_force_anneal = false;
++	int sa_seed = 20136;   // M1.5: SA 的 RNG 种子，同种子必须得到同一映射
+ 	// 上游 SA 把 isCurrMappingValid() 同时当停止条件和接受条件：一旦可行就立刻
+ 	// 返回，所以它只是个可行性搜索器，从不优化。置 true 让它在可行之后继续退火，
+ 	// 最后回滚到代价最小的那个可行快照。
+@@ -146,7 +147,8 @@
+ 		.add_option<bool>("-e", "--noMutexPaths", "noMutexPaths", false)
+ 		.add_option<int>("-b", "--backtrack_limit", "back track limit", 0)
+ 		.add_option<int>("", "--max_II", "max II", 32)
+-		.add_option<bool>("", "--sa_force_anneal", "SA: anneal even if the PathFinder warm start is already valid", false)
++		.add_option<int>("", "--sa_seed", "RNG seed for SA (same seed => same mapping)", 20136)
++					.add_option<bool>("", "--sa_force_anneal", "SA: anneal even if the PathFinder warm start is already valid", false)
+ 		.add_option<bool>("", "--sa_optimize", "SA: keep annealing after feasibility and return the cheapest valid snapshot", false)
+ 		.add_option<int>("", "--sa_budget", "SA: max number of moves (0 = unlimited)", 0)
+ 		.add_option<std::string>("", "--constraints", "JSON file with pins/forbidden (M1)", "")
+@@ -169,6 +171,7 @@
+ 	ret.mapping_method = args.get_option<int>("--mapping");
+ 	ret.max_II = args.get_option<int>("--max_II");
+ 	ret.sa_force_anneal = args.get_option<bool>("--sa_force_anneal");
++	ret.sa_seed = args.get_option<int>("--sa_seed");
+ 	ret.sa_optimize = args.get_option<bool>("--sa_optimize");
+ 	ret.sa_budget = args.get_option<int>("--sa_budget");
+ 	ret.constraints_file = args.get_option<std::string>("--constraints");
+diff -ruN snap3b/mapper/src/CGRA_xml_compiler.cpp snap4/mapper/src/CGRA_xml_compiler.cpp
+--- a/src/CGRA_xml_compiler.cpp	2026-11-23 12:57:31.691758855 +0000
++++ b/src/CGRA_xml_compiler.cpp	2026-11-23 12:57:31.751758591 +0000
+@@ -88,7 +88,8 @@
+ 		mapper = new PathFinderMapper(inputDFG_filename);
+ 	}else if(mapping_method  == 1){
+ 		mapper = new SAMapper(inputDFG_filename);
+-		static_cast<SAMapper *>(mapper)->forceAnneal = args.sa_force_anneal;
++		static_cast<SAMapper *>(mapper)->seedRng((unsigned)args.sa_seed);
++				static_cast<SAMapper *>(mapper)->forceAnneal = args.sa_force_anneal;
+ 		static_cast<SAMapper *>(mapper)->optimizeAfterFeasible = args.sa_optimize;
+ 		static_cast<SAMapper *>(mapper)->moveBudget = args.sa_budget;
+ 		
+diff -ruN snap3b/mapper/src/mapper/SimulatedAnnealingMapper.cpp snap4/mapper/src/mapper/SimulatedAnnealingMapper.cpp
+--- a/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-23 12:57:31.691758855 +0000
++++ b/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-23 12:57:31.751758591 +0000
+@@ -522,8 +522,8 @@
+ CGRAXMLCompile::DFGNode *CGRAXMLCompile::SAMapper::selectDFGNodeToUnmap()
+ {
+ 
+-	std::random_device r;
+-	std::default_random_engine e1(r());
++	// M1.5: 用成员 rng（可 --sa_seed），不再每次调用都重新播种真随机源
++	std::mt19937 &e1 = rng;
+ 	std::uniform_int_distribution<int> uniform_dist(0, sortedNodeList.size() - 1);
+ 	return sortedNodeList[std::abs(std::round(uniform_dist(e1)))];
+ 
+@@ -566,8 +566,7 @@
+ 		}
+ 	}
+ 	assert(candidates.size() > 0);
+-	std::random_device r;
+-	std::default_random_engine e1(r());
++	std::mt19937 &e1 = rng;
+ 	std::uniform_int_distribution<int> uniform_dist(0, candidates.size() - 1);
+ 	return candidates[std::abs(std::round(uniform_dist(e1)))];
+ }
+@@ -1020,9 +1019,8 @@
+ 		}
+ 	}
+ 
+-	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+-
+-	shuffle(candidateDests.begin(), candidateDests.end(), std::default_random_engine(seed));
++	// M1.5: 候选表洗牌也走 rng（上游用 system_clock 当种子，无法复现）
++	shuffle(candidateDests.begin(), candidateDests.end(), rng);
+ 
+ 	return candidateDests;
+ }

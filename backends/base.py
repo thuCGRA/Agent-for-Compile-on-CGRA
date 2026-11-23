@@ -20,9 +20,34 @@ class Hints:
     region: list = field(default_factory=list)      # 只允许后端动这些节点
     budget: dict = field(default_factory=dict)      # 后端专属：rounds / temp / moves ...
     note: str = ""                                  # 给日志看的一句话
+    # M1.5: 随机后端（SA）的种子。固定种子是"同实例同判据"对比的前提——
+    # 上游 SA 每个随机点都用真随机源，同一输入两次跑出不同映射，
+    # 甚至一次能映射一次不能。
+    seed: int = 20136
 
     def is_empty(self):
         return not (self.pins or self.forbidden or self.region or self.budget)
+
+    def to_constraints_json(self):
+        """转成 mapper --constraints 读的格式；空约束返回 None。
+
+        pins 里的 t（相位）会被丢掉：相位是 mapper 从数据到达时间推出来的结果，
+        钉住它等于把 mapper 的搜索空间砍掉一半（旧工程的实测：全 pin 只有 2/10 可映射，
+        只给 (x,y) 是 7/10）。这里只保留 agent 真正该管的空间维度。
+        """
+        if not self.pins and not self.forbidden:
+            return None
+        doc = {"pin_mode": "strict"}
+        if self.pins:
+            doc["pins"] = {str(int(i)): [int(p[0]), int(p[1])]
+                           for i, p in self.pins.items()}
+        if self.forbidden:
+            f = {}
+            for item in self.forbidden:
+                idx, x, y = int(item[0]), int(item[1]), int(item[2])
+                f.setdefault(str(idx), []).append([x, y])
+            doc["forbidden"] = f
+        return doc
 
 
 @dataclass

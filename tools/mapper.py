@@ -10,6 +10,7 @@ agent 的所有动作最终都落到这里的形参上。
   result.txt                                                   "<dfg> method:<Name> <ii> <iter>"
   map.log                                                      mapper 的 stdout
 """
+import json
 import os
 import re
 import shutil
@@ -195,6 +196,8 @@ class MapRun:
     binary: Optional[str] = None
     result_txt: str = ""
     source: str = ""
+    error: str = ""
+    success_text: bool = False
 
     def phases(self):
         """转成 core.check 要的相位表：{idx: (x, y, t % ii)}。"""
@@ -204,8 +207,9 @@ class MapRun:
 
 
 def run_mapper(kernel, backend="pathfinder", ii=0, xdim=4, ydim=4,
+               constraints=None,
                workdir=None, timeout=1800.0, extra_args=(), root=None,
-               keep=False):
+               keep=False, real_nodes=None, max_ii=None):
     """在独立工作目录里跑一次 mapper。
 
     workdir 为 None 时用 work/map/<kernel>/<backend>_ii<ii>/。
@@ -242,6 +246,19 @@ def run_mapper(kernel, backend="pathfinder", ii=0, xdim=4, ydim=4,
     cmd = [mapper_binary(root), "-d", "dfg.xml", "-j", "arch.json",
            "-x", str(xdim), "-y", str(ydim), "-i", str(ii),
            "-t", "HyCUBE_4REG", "-m", str(BACKENDS[backend])]
+
+    # M1: 约束走文件。写成绝对路径再交给 mapper——它的 cwd 是 workdir，
+    # 相对路径会解析到别处（旧工程踩过：找不到文件直接 SIGSEGV）。
+    if constraints:
+        cpath = os.path.join(workdir, "constraints.json")
+        with open(cpath, "w", encoding="utf-8") as f:
+            json.dump(constraints, f, indent=1, sort_keys=True)
+        cmd.extend(["--constraints", cpath])
+    if max_ii:
+        # mapper 的 II 循环是 `II++; if (II == max_II) break;`（等号！），
+        # 所以传进去的必须是"第一个放弃的 II"，这里统一 +1。
+        # 只影响"失败后要不要继续往上试 II"，不影响成功时的搜索。
+        cmd.extend(["--max_II", str(int(max_ii) + 1)])
     cmd.extend(extra_args)
 
     t0 = time.time()
@@ -275,13 +292,27 @@ def run_mapper(kernel, backend="pathfinder", ii=0, xdim=4, ydim=4,
             if mm:
                 run.ii = max(run.ii, int(mm.group(1)))
 
-    placement, lat, source = extract_placement(workdir, run.ii or None)
+    run.success_text = "Map Success" in out
+    # 只认 DFG 里的真实节点（mapper 会写 20019/20020 这类伪节点）
+    real = set(int(i) for i in real_nodes) if real_nodes else None
+    placement, lat, source = extract_placement(workdir, run.ii or None, real)
     if placement:
         run.placement = placement
         run.lat = lat
         run.source = source
         run.binary = find_binary(workdir, run.ii or None)
-        run.ok = bool(placement) and ("Map Success" in out or rc == 0)
+        # 三条同时成立才算成功（见文件头注释：失败也会留半截产物、退出码恒 0）
+        problems = []
+        if not run.success_text:
+            problems.append("stdout 里没有 'Map Success'（mapper 实际失败）")
+        if real and len(placement) < len(real):
+            problems.append("只覆盖 %d/%d 个节点（半截产物）"
+                            % (len(placement), len(real)))
+        if problems:
+            run.ok = False
+            run.error = "; ".join(problems)
+        else:
+            run.ok = True
     else:
         run.error = "mapper 没有可读的放置产物（mappingwithlatency 与 routeInfo.log 都是空/缺）"
     return run

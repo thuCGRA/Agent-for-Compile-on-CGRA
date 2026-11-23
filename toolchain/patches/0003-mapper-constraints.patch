@@ -1,0 +1,327 @@
+diff -ruN snap2/mapper/include/morpher/mapper/Constraints.h snap3/mapper/include/morpher/mapper/Constraints.h
+--- a/include/morpher/mapper/Constraints.h	1970-01-01 00:00:00.000000000 +0000
++++ b/include/morpher/mapper/Constraints.h	2026-11-23 11:00:12.941788781 +0000
+@@ -0,0 +1,188 @@
++/*
++ * Constraints.h
++ *
++ * M1：把"agent 想怎么放"变成 mapper 的硬约束。
++ *
++ * 只做两件可验证的事：
++ *   pins      某些节点必须落在给定 (x,y)
++ *   forbidden 某些节点不许落在给定 (x,y)
++ *
++ * 为什么只有 strict 没有 prefer：候选集后面进的是 priority_queue，
++ * 顺序注入不生效；而 dpPenaltyMap 在 PathFinderMapper.cpp 里只写不读（死代码），
++ * 加"软提示"会变成假装有效。宁可少一个模式，不留假功能。
++ *
++ * 为什么允许多个节点 pin 到同一个 PE：CGRA 是时分复用的，同一 PE 在不同相位
++ * 承载不同节点是常态。实测 array_add 的基线解里节点 0 与 12 都在 PE(1,2)。
++ * 第一版把这条当错误，结果把 mapper 自己产出的合法解判成非法 —— 与当初
++ * 把 OSTORE 判成算术算子同一类错误：把我以为的约束当成了硬约束。
++ * 同一 PE 上放不放得下，交给 mapper 的 checkDPFree 判，这里不越权。
++ *
++ * 语义与 ~/cac 的 LLMMapper 一致，但这里不碰相位：相位由 mapper 自己推。
++ */
++
++#ifndef CONSTRAINTS_H_
++#define CONSTRAINTS_H_
++
++#include <cstdlib>
++#include <fstream>
++#include <iostream>
++#include <map>
++#include <set>
++#include <sstream>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "morpher/arch/json.hpp"
++
++namespace CGRAXMLCompile
++{
++
++class Constraints
++{
++public:
++	struct Pin
++	{
++		int x;
++		int y;
++	};
++
++	bool enabled = false;
++	// 同一节点既 pin 又 forbidden 时，forbidden 优先（宁可保守地报失败，
++	// 也不要在矛盾约束下产出一个"看起来成功"的映射）。
++	std::map<int, Pin> pins;
++	std::map<int, std::vector<Pin> > forbidden;
++
++	bool hasPin(int idx) const
++	{
++		return pins.find(idx) != pins.end();
++	}
++
++	bool isForbidden(int idx, int x, int y) const
++	{
++		std::map<int, std::vector<Pin> >::const_iterator it = forbidden.find(idx);
++		if (it == forbidden.end())
++			return false;
++		for (size_t i = 0; i < it->second.size(); ++i)
++		{
++			if (it->second[i].x == x && it->second[i].y == y)
++				return true;
++		}
++		return false;
++	}
++
++	// 核心判据：节点 idx 能否落在 (x,y)
++	bool allowed(int idx, int x, int y) const
++	{
++		if (!enabled)
++			return true;
++		if (isForbidden(idx, x, y))
++			return false;
++		if (hasPin(idx))
++		{
++			const Pin &p = pins.find(idx)->second;
++			return p.x == x && p.y == y;
++		}
++		// 没被 pin 的节点不受额外限制：它落在哪个 PE 是 mapper 的自由，
++		// 即使那个 PE 上已经有被 pin 的节点（不同相位可以共存）。
++		return true;
++	}
++
++	bool loadFromFile(const std::string &path)
++	{
++		std::ifstream in(path.c_str());
++		if (!in.good())
++		{
++			std::cerr << "constraints: cannot open " << path << "\n";
++			return false;
++		}
++		nlohmann::json j;
++		try
++		{
++			in >> j;
++		}
++		catch (std::exception &e)
++		{
++			std::cerr << "constraints: " << path << " is not valid JSON: " << e.what() << "\n";
++			return false;
++		}
++
++		if (j.contains("pin_mode"))
++		{
++			std::string mode = j["pin_mode"].get<std::string>();
++			if (mode != "strict")
++			{
++				std::cerr << "constraints: pin_mode='" << mode
++						  << "' is not supported (only 'strict')\n";
++				return false;
++			}
++		}
++
++		if (j.contains("pins"))
++		{
++			for (auto it = j["pins"].begin(); it != j["pins"].end(); ++it)
++			{
++				int idx = std::atoi(it.key().c_str());
++				Pin p;
++				p.x = it.value()[0].get<int>();
++				p.y = it.value()[1].get<int>();
++				// 不检查"两个节点 pin 到同一 PE"：时分复用下这是合法的，
++				// 是否真放得下由 mapper 的 checkDPFree 在搜索时判。
++				pins[idx] = p;
++			}
++		}
++
++		if (j.contains("forbidden"))
++		{
++			for (auto it = j["forbidden"].begin(); it != j["forbidden"].end(); ++it)
++			{
++				int idx = std::atoi(it.key().c_str());
++				std::vector<Pin> v;
++				for (size_t i = 0; i < it.value().size(); ++i)
++				{
++					Pin p;
++					p.x = it.value()[i][0].get<int>();
++					p.y = it.value()[i][1].get<int>();
++					v.push_back(p);
++				}
++				forbidden[idx] = v;
++			}
++		}
++
++		// 自相矛盾要在开工前就报，而不是让 mapper 跑一遍才失败
++		for (auto it = pins.begin(); it != pins.end(); ++it)
++		{
++			if (isForbidden(it->first, it->second.x, it->second.y))
++			{
++				std::cerr << "constraints: node " << it->first << " is both pinned to and forbidden at ("
++						  << it->second.x << "," << it->second.y << ")\n";
++				return false;
++			}
++		}
++
++		enabled = true;
++		return true;
++	}
++
++	std::string describe() const
++	{
++		std::ostringstream os;
++		if (!enabled)
++		{
++			os << "constraints: none";
++			return os.str();
++		}
++		os << "constraints: " << pins.size() << " pin(s)";
++		for (auto it = pins.begin(); it != pins.end(); ++it)
++			os << " [" << it->first << "->(" << it->second.x << "," << it->second.y << ")]";
++		size_t nf = 0;
++		for (auto it = forbidden.begin(); it != forbidden.end(); ++it)
++			nf += it->second.size();
++		os << ", " << nf << " forbidden";
++		return os.str();
++	}
++};
++
++} // namespace CGRAXMLCompile
++
++#endif /* CONSTRAINTS_H_ */
+diff -ruN snap2/mapper/include/morpher/mapper/PathFinderMapper.h snap3/mapper/include/morpher/mapper/PathFinderMapper.h
+--- a/include/morpher/mapper/PathFinderMapper.h	2026-11-23 10:45:41.932962019 +0000
++++ b/include/morpher/mapper/PathFinderMapper.h	2026-11-23 11:00:12.941788781 +0000
+@@ -5,6 +5,7 @@
+  *      Author: manupa
+  */
+ 
++#include <morpher/mapper/Constraints.h>
+ #include <morpher/mapper/HeuristicMapper.h>
+ #include <morpher/util/debug.h>
+ #include <string>
+@@ -64,6 +65,9 @@
+ class PathFinderMapper : public HeuristicMapper
+ {
+ public:
++	// M1: pins / forbidden。SA 继承自本类，因此两个后端共用同一套语义。
++	Constraints constraints;
++
+ 	PathFinderMapper(std::string fName) : HeuristicMapper(fName){
+ 		mapping_method_name  = "PathFinder";
+ 										  };
+diff -ruN snap2/mapper/include/morpher/util/util.h snap3/mapper/include/morpher/util/util.h
+--- a/include/morpher/util/util.h	2026-11-23 10:45:41.944961991 +0000
++++ b/include/morpher/util/util.h	2026-11-23 11:00:12.945788769 +0000
+@@ -49,7 +49,9 @@
+ 	// 返回，所以它只是个可行性搜索器，从不优化。置 true 让它在可行之后继续退火，
+ 	// 最后回滚到代价最小的那个可行快照。
+ 	bool sa_optimize = false;
+-	int sa_budget = 0; // 移动次数上限，0 = 不限（上游行为）
++	int sa_budget = 0;
++	// M1: 约束文件（JSON），空表示无约束
++	std::string constraints_file; // 移动次数上限，0 = 不限（上游行为）
+ 	std::string arch_name = "";
+ 	lisa_arguments lisa_arg;
+ };
+@@ -147,6 +149,7 @@
+ 		.add_option<bool>("", "--sa_force_anneal", "SA: anneal even if the PathFinder warm start is already valid", false)
+ 		.add_option<bool>("", "--sa_optimize", "SA: keep annealing after feasibility and return the cheapest valid snapshot", false)
+ 		.add_option<int>("", "--sa_budget", "SA: max number of moves (0 = unlimited)", 0)
++		.add_option<std::string>("", "--constraints", "JSON file with pins/forbidden (M1)", "")
+ 		.add_option<std::string>("", "--arch_name", "architecture name", "")
+ 		.add_option<bool>("", "--lisa_training", "lisa training", false)
+ 		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
+@@ -168,6 +171,7 @@
+ 	ret.sa_force_anneal = args.get_option<bool>("--sa_force_anneal");
+ 	ret.sa_optimize = args.get_option<bool>("--sa_optimize");
+ 	ret.sa_budget = args.get_option<int>("--sa_budget");
++	ret.constraints_file = args.get_option<std::string>("--constraints");
+ 	ret.use_json = true;
+ 	ret.arch_name = args.get_option<std::string>("--arch_name");
+ 	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");
+diff -ruN snap2/mapper/src/CGRA_xml_compiler.cpp snap3/mapper/src/CGRA_xml_compiler.cpp
+--- a/src/CGRA_xml_compiler.cpp	2026-11-23 10:45:41.944961991 +0000
++++ b/src/CGRA_xml_compiler.cpp	2026-11-23 11:00:13.005788594 +0000
+@@ -100,6 +100,18 @@
+ 	}
+ 
+ 	
++	// M1: 约束在 mapper 建好之后、任何映射开始之前装载；装不上就退出，
++	// 不能带着半套约束跑（那会产出看起来成功但违反约束的映射）。
++	if (!args.constraints_file.empty())
++	{
++		if (!mapper->constraints.loadFromFile(args.constraints_file))
++		{
++			std::cerr << "FATAL: failed to load constraints from " << args.constraints_file << "\n";
++			return 1;
++		}
++		std::cout << mapper->constraints.describe() << "\n";
++	}
++
+ 	mapper->setMaxIter(args.maxiter);
+ 	std::cout << "MAP begin... \n";
+ 	int resII = mapper->getMinimumII(testCGRA, &currDFG);
+diff -ruN snap2/mapper/src/mapper/PathFinderMapper.cpp snap3/mapper/src/mapper/PathFinderMapper.cpp
+--- a/src/mapper/PathFinderMapper.cpp	2026-11-23 10:45:41.936962009 +0000
++++ b/src/mapper/PathFinderMapper.cpp	2026-11-23 11:00:13.005788594 +0000
+@@ -704,6 +704,27 @@
+ 		}
+ 	}
+ 
++	// M1: 约束过滤。位置必须在候选集生成之后、getLatCandDests 之前，
++	// 否则后面按 minLat 做的裁剪会作用在未过滤的集合上。
++	if (constraints.enabled && !candidateDests.empty())
++	{
++		std::vector<DataPath *> kept;
++		kept.reserve(candidateDests.size());
++		for (DataPath *dp : candidateDests)
++		{
++			int px = dp->getPE()->getPosition_X();
++			int py = dp->getPE()->getPosition_Y();
++			if (constraints.allowed(node->idx, px, py))
++				kept.push_back(dp);
++		}
++		if (kept.size() != candidateDests.size())
++		{
++			LOG(ROUTE) << "constraints: node " << node->idx << " candidates "
++			           << candidateDests.size() << " -> " << kept.size() << "\n";
++		}
++		candidateDests.swap(kept);
++	}
++
+ 	LOG(ROUTE)<< "Candidate Dests = " << candidateDests.size() << "\n";
+ 	if (candidateDests.empty())
+ 		return false;
+diff -ruN snap2/mapper/src/mapper/SimulatedAnnealingMapper.cpp snap3/mapper/src/mapper/SimulatedAnnealingMapper.cpp
+--- a/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-23 10:45:41.948961981 +0000
++++ b/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-23 12:44:30.151062433 +0000
+@@ -959,6 +959,13 @@
+ 
+ 								if (node->blacklistDest.find(dp) == node->blacklistDest.end())
+ 								{
++									// M1: 退火阶段也必须遵守约束。initMap 走的是
++									// PathFinderMapper::estimateRouting（那里已过滤），
++									// 但邻域算子走这里，漏掉就等于约束只在热启动时有效。
++									if (!constraints.allowed(node->idx,
++									                         dp->getPE()->getPosition_X(),
++									                         dp->getPE()->getPosition_Y()))
++										continue;
+ 									candidateDests.push_back(dp);
+ 									dpPenaltyMap[dp] = penalty;
+ 								}
+@@ -995,6 +1002,13 @@
+ 
+ 								if (node->blacklistDest.find(dp) == node->blacklistDest.end())
+ 								{
++									// M1: 退火阶段也必须遵守约束。initMap 走的是
++									// PathFinderMapper::estimateRouting（那里已过滤），
++									// 但邻域算子走这里，漏掉就等于约束只在热启动时有效。
++									if (!constraints.allowed(node->idx,
++									                         dp->getPE()->getPosition_X(),
++									                         dp->getPE()->getPosition_Y()))
++										continue;
+ 									candidateDests.push_back(dp);
+ 									dpPenaltyMap[dp] = penalty;
+ 								}

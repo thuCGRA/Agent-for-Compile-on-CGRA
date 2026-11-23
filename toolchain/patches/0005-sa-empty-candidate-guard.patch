@@ -1,0 +1,49 @@
+diff -ruN snap4b/mapper/src/mapper/SimulatedAnnealingMapper.cpp snap5/mapper/src/mapper/SimulatedAnnealingMapper.cpp
+--- a/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-23 15:55:05.858596646 +0000
++++ b/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-23 15:55:05.914595269 +0000
+@@ -414,7 +414,28 @@
+ 			LOG(SA)<<"this DFG node is not placed yet" ;
+ 		}
+ 		
+-		auto dp_candidate = getRandomDPCandidate(selected_dfg_node).front();
++		// M1: 约束（--constraints）过滤之后候选表可能为空。上游在这里直接 .front()，
++		// 空表就是未定义行为——实测 SIGSEGV，gdb 栈：inner_map:417 -> SAMap:145 -> main:179。
++		// 空表只说明"这个节点此刻没有合法位置"，那是一次失败的移动，不是崩溃的理由：
++		// 回滚已清掉的节点、恢复快照、继续下一次移动。
++		std::vector<DataPath *> dp_candidates = getRandomDPCandidate(selected_dfg_node);
++		if (dp_candidates.empty())
++		{
++			LOG(SA) << "no legal candidate for node " << selected_dfg_node->idx
++			        << " (constraints filtered everything), skip this move\n";
++			moved_nodes.push_back(selected_dfg_node);
++			for (auto node : moved_nodes)
++			{
++				clearNodeMapping(node);
++				restoreMapping(node, old_dfg_node_placement, old_data_routing_path);
++			}
++			dfg_node_placement.clear();
++			dfg_node_placement.insert(old_dfg_node_placement.begin(), old_dfg_node_placement.end());
++			data_routing_path.clear();
++			data_routing_path.insert(old_data_routing_path.begin(), old_data_routing_path.end());
++			continue;
++		}
++		auto dp_candidate = dp_candidates.front();
+ 		LOG(SA) << "map this DFG node:" << selected_dfg_node->idx << " op:" << selected_dfg_node->op << "to pe:" << dp_candidate->getPE()->getName() ;
+ 		bool route_succ = SARoute(selected_dfg_node, dp_candidate);
+ 		moved_nodes.push_back(selected_dfg_node);
+@@ -438,7 +459,14 @@
+ 			{
+ 				moved_nodes.push_back(parent);
+ 				clearNodeMapping(parent);
+-				auto dp_candidate = getRandomDPCandidate(parent).front();
++				std::vector<DataPath *> parent_candidates = getRandomDPCandidate(parent);
++				if (parent_candidates.empty())
++				{
++					// 同样的空表保护（这段当前是死代码，但保留正确的写法）
++					route_succ = false;
++					break;
++				}
++				auto dp_candidate = parent_candidates.front();
+ 				LOG(SA) << "route other parent node = " << parent->idx << " op:" << parent->op << " current_pe:" << dp_candidate->getPE()->getName() << "\n";
+ 				if (!SARoute(parent, dp_candidate))
+ 				{
