@@ -1,0 +1,109 @@
+﻿# acc-thu / evo锛氱敤浼愯皨锛團amou 2.0锛夋紨鍖?CGRA 鏄犲皠绠楁硶
+#
+# 鐢ㄦ硶锛堝湪 ~/acc-thu 涓嬶級锛?#   ~/miniconda3/envs/famou/bin/python ~/famou-v2/run_famou.py \
+#       -c evo/config.yaml -p evo/init.py -e evo/evaluator.py
+#
+# 涓?examples/circle_packing 鐨勫尯鍒細杩欓噷鐨勯€傚簲搴︿笉鏄诞鐐硅宸紝鑰屾槸
+# "涓€浠芥斁缃兘涓嶈兘鍦?4x4 HyCUBE 涓婂悎娉曚笖灏戠粫璺?锛岃瘎涓€娆＄害 50 ms锛堢函 Python锛夈€?
+experiment:
+  name: cgra_mapper_evolution
+  task_description: |
+    # CGRA 鏄犲皠绠楁硶鐨勬紨鍖栦换鍔?
+    ## 鑳屾櫙
+    鎴戜滑瑕佷负涓€涓?4x4 鐨?CGRA锛圚yCUBE 缁撴瀯锛夊啓鏄犲皠鍣ㄣ€傝緭鍏ユ槸涓€涓暟鎹祦鍥撅紙DFG锛夆€斺€?    缂栬瘧鍣ㄥ墠绔紙LLVM pass锛夋妸 C 寰幆浣撳彉鎴愪簡鑻ュ共绠楀瓙鍜屽畠浠箣闂寸殑渚濊禆杈广€?    浣犵殑浠诲姟鏄啓涓€涓嚱鏁帮紝鍐冲畾**姣忎釜绠楀瓙鏀惧湪鍝釜 PE 涓娿€佸湪浠€涔堢浉浣嶆墽琛?*銆?
+    纭欢缁撴瀯锛?    - 闃靛垪 4x4 = 16 涓?PE锛屽潗鏍?(x, y)锛寈 浠?0 鍒?3锛寉 浠?0 鍒?3銆?    - **x=0 閭ｄ竴鍒楃殑 4 涓?PE 鏄?PE_MEM**锛堣瀛?PE锛夛紝瀹冧滑杩炵潃鐗囦笂瀛樺偍锛圫PM锛夈€?    - x=1..3 鐨?12 涓?PE 鏄畻鏈?PE锛圓LU锛夛紝鍙兘鍋氱畻鏈€?    - 鐩搁偦 PE 涔嬮棿鏈夊洓涓柟鍚戠殑杩炵嚎锛圢/E/S/W锛夛紝涓€娆′紶杈撹蛋涓€鏉¤竟绠?1 璺炽€?    - 姣忎釜 PE 姣忎釜鐩镐綅锛坈ycle锛夊彧鑳芥墽琛?1 涓畻瀛愩€?    - 鐩镐綅鏄ā II 鐨勶細PE 鍦ㄥ懆鏈?c 鎵ц锛岀瓑浠蜂簬鍦ㄥ懆鏈?c+II銆乧+2II鈥︹€︽墽琛屻€?
+    ## 浣犺瀹炵幇鐨勬帴鍙?    ```python
+    def place(prob, ii):
+        '''杩斿洖 {node_idx: (x, y, t)}'''
+    ```
+    `prob` 鏄竴涓?dict锛屽瓧娈靛涓嬶紙鍏ㄩ儴鏄唴寤虹被鍨嬶紝鍙洿鎺?pickle锛夛細
+
+    | 閿?| 鍚箟 |
+    |---|---|
+    | `kernel` | 鍐呮牳鍚嶏紙瀛楃涓诧紝浠呬緵璋冭瘯锛?|
+    | `ii` | 鏈瑕佹眰鐨勫惎鍔ㄩ棿闅旓紙涓庡弬鏁?`ii` 鐩稿悓锛?|
+    | `xdim`, `ydim` | 闃靛垪灏哄锛岃繖閲屾槸 4 鍜?4 |
+    | `pe_mem` | 璁垮瓨 PE 鐨勫潗鏍囧垪琛紝濡?`[[0,0],[0,1],[0,2],[0,3]]` |
+    | `pe_alu` | 绠楁湳 PE 鐨勫潗鏍囧垪琛紙12 涓級 |
+    | `nodes` | 鑺傜偣鍒楄〃锛屾瘡涓槸 `{"idx","op","parents","children","const","var","is_mem","lat"}` |
+    | `edges` | 杈瑰垪琛紝姣忎釜鏄?`[parent_idx, child_idx, nextiter]` |
+    | `alu_ops`, `mem_ops` | 绠楀瓙鍚?鈫?寤惰繜锛圓LU 鐨勫鏁版槸 1锛岃瀛樻槸 2锛?|
+    | `var_bank` | 鍙橀噺鍚?鈫?bank 缂栧彿锛坄is_mem` 鑺傜偣鐨?`var` 钀藉湪杩欎釜 bank 涓婏級 |
+    | `bank_vars` | bank 缂栧彿 鈫?璇?bank 閲岀殑鍙橀噺鍚?|
+    | `n_nodes`, `op_hist`, `res_min_ii` | 瑙勬ā涓庣畻瀛愮洿鏂瑰浘锛岃祫婧愪笅鐣?|
+
+    `is_mem=True` 鐨勮妭鐐癸紙LOAD/LOADB/LOADH/LOADCL/STORE/STOREB/STOREH锛?    蹇呴』鏀惧湪 `pe_mem` 涓婏紱鍏朵綑鑺傜偣蹇呴』鏀惧湪 `pe_alu` 涓娿€?
+    ## 纭害鏉燂紙杩濆弽浠绘剰涓€鏉★紝璇ュ唴鏍稿緱 0 鍒嗭級
+    1. 姣忎釜鑺傜偣鎭板ソ涓€涓綅缃紝涓嶈兘婕忎篃涓嶈兘閲嶅锛?    2. 鍚屼竴涓?`(x, y, t)` 涓嶈兘鏀句袱涓妭鐐癸紱
+    3. `0 <= x < xdim`锛宍0 <= y < ydim`锛宍0 <= t < ii`锛?    4. 璁垮瓨绠楀瓙鍙兘鍦?`pe_mem` 涓婏紝绠楁湳绠楀瓙鍙兘鍦?`pe_alu` 涓婏紱
+    5. SELECT / CMERGE 鏈変袱涓搷浣滄暟锛屽畠浠殑涓や釜鐖惰竟蹇呴』钀藉湪**涓嶅悓**鐨勭浉浣嶄笂
+       锛堜竴涓湪 `t`锛屽彟涓€涓湪 `t-1`锛夛紝鍚﹀垯鍔熻兘鍗曞厓鎷夸笉鍒颁袱涓搷浣滄暟銆?
+    ## 鐩镐綅涓庤烦鏁扮殑鍏崇郴锛堝喅瀹氫簡鍒嗘暟锛?    涓€鏉¤竟 `p -> c` 鐨勮烦鏁?`h` 蹇呴』婊¤冻鍚屼綑寮?    ```
+    h 鈮?(鍒拌揪鐩镐綅 - t_p - lat_p)  (mod ii),   h >= |x_p-x_c| + |y_p-y_c|
+    ```
+    涔熷氨鏄锛氱埗鑺傜偣鍦ㄧ `t_p` 鎷嶇畻鍑虹粨鏋滐紝缁忚繃 `lat_p` 鎷嶅欢杩熷拰 `h` 璺充紶杈擄紝
+    蹇呴』鍦ㄥ瓙鑺傜偣鎵ц鐨勯偅涓€鎷嶏紙鎴?SELECT 鐨?`t_c-1` 閭ｄ竴鎷嶏級鍒拌揪銆?    **澶氬嚭鏉ョ殑璺虫暟 `h - 鏇煎搱椤胯窛绂籤 鍙粫璺紝缁曡矾瓒婂皯瓒婂ソ銆?*
+
+    ## 鎵撳垎
+    姣忎釜鍐呮牳鍦ㄤ袱涓?II 涓婅瘎娴嬶細II=4锛堝熀绾匡紝蹇呴』鍋氬埌锛夊拰 II=3锛堟洿闅撅紝鍐插埡鐩爣锛夈€?    ```
+    score_kernel = 0.6 / (1 + cost_ii4 / 20) + 0.4 / (1 + cost_ii3 / 20)   # 鍙湁鍚堟硶鎵嶈鍒?    combined_score = mean(score_kernel over 3 kernels)
+    ```
+    `cost = 缁曡矾鎬昏烦鏁?+ 3 x 绔彛瓒呴`锛堝悓涓€ PE 鍚屼竴鎷嶈繘鍏ヨ秴杩?4 鏉¤竟绠楄秴棰濓級銆?    鎵€浠?`combined_score` 鐨勪笂鐣屾槸 1.0锛屽熀绾跨▼搴忓ぇ绾?0.60銆?
+    ## 浼樺寲寤鸿
+    - 鏈変緷璧栫殑鑺傜偣灏介噺鏀剧浉閭伙紙鏇煎搱椤胯窛绂诲皬锛夛紝渚濊禆閾炬部涓€琛屾垨涓€鍒楅摵寮€锛?    - 璁垮瓨鑺傜偣鎸?`var_bank` 鏀惧埌瀵瑰簲 bank 閭ｄ竴琛岀殑 PE_MEM 涓婏紙`bank 0` 鈫?y=0 琛岀瓑锛夛紝
+      杩欐牱璁垮瓨杈逛笉浼氭í璺ㄦ暣鍒楋紱
+    - 鐩镐綅鏄ā II 鐨勶紝`t` 鍙湪 `[0, ii)` 閲岋紝涓嶈璇曞浘鐢ㄥぇ t 鍘昏翰鍐茬獊锛?    - SELECT/CMERGE 鐨勪袱涓埗鑺傜偣鐩镐綅瑕侀敊寮€ 1锛岃繖閫氬父闇€瑕佽涓や釜鐖惰妭鐐硅窛绂讳笉鍚?      鎴栬€?`t` 涓嶅悓锛?    - II=3 鏃剁浉浣嶆Ы浣嶅彧鏈?3 涓紝姣?II=4 绱у緱澶氾紝娉ㄦ剰鍒鍚屼竴 PE 鍦ㄥ悓涓€鐩镐綅鎸ょ垎銆?
+    ## 涓変釜璇勬祴鍐呮牳
+    `array_add`锛?0 鑺傜偣锛岃瀛樺瘑闆嗭級銆乣mac`锛?2 鑺傜偣锛屽惈 SELECT 褰掔害锛夈€?    `trmm`锛?1 鑺傜偣锛屽惈 OLOAD/OSTORE锛夈€傜▼搴忓繀椤诲涓夎€呴兘鎴愮珛锛屼笉瑕侀拡瀵规煇涓€涓壒鍖栥€?
+  language: python
+  strategy: greedy
+  max_iterations: 2
+  max_workers: 1
+  checkpoint_interval: 5
+  seed: 42
+
+  island:
+    num_islands: 4
+    island_size: 50
+    migration_interval: 10
+    migration_size: 2
+    migration_topology: ring
+    reset_interval: 40
+    reset_size: 2
+
+  debug:
+    enabled: true
+    max_iterations: 2
+
+infrastructure:
+  llm:
+    provider: mock
+    api_base: mock
+    model: mock
+    api_key: mock
+    temperature: 0.7
+    max_tokens: 2000
+    timeout: 60
+
+  storage:
+    type: local
+    base_path: ./famou_data_mock
+
+  logger:
+    type: local
+    level: INFO
+    file_enabled: true
+
+  env:
+    type: local
+    timeout: 300
+
+  monitor:
+    enabled: false
+    type: wandb
+
+  langfuse:
+    enabled: false
+    public_key: none
+    secret_key: none
+    base_url: https://us.cloud.langfuse.com

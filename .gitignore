@@ -11,3 +11,8 @@ __pycache__/
 
 # patch 应用标记（apply_patch 自己维护，不入库）
 *.patch.applied
+
+# 伐谋演化：本地生成的配置含明文密钥，实验产物不入库
+evo/config.yaml
+famou_data/
+famou_data_mock/
