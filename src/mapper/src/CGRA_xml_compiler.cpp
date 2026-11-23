@@ -118,6 +118,20 @@ int main(int argn, char *argc[])
 	}
 	mapper->enableBackTracking = true;
 	mapper->backTrackLimit = args.backtracklimit;
+	// PINHOOK: external placement pins
+	mapper->pinsMode = args.pins_mode;
+	if (!args.pins_file.empty())
+	{
+		if (!mapper->loadPins(args.pins_file))
+		{
+			std::cout << "PIN: could not load " << args.pins_file << "\n";
+			return 1;
+		}
+	}
+	else
+	{
+		mapper->pinsMode = 0;
+	}
 
 	//cout << "json_file_name = " << json_file_name << "\n";
 	// exit(EXIT_SUCCESS);

@@ -45,6 +45,9 @@ struct arguments
 	int max_II = 32;
 	std::string arch_name = "";
 	lisa_arguments lisa_arg;
+	// PINHOOK: external placement pins (ILP / SA warm start)
+	std::string pins_file = ""; // "idx x y t" per line, t<0 = spatial only
+	int pins_mode = 0;           // 0 off, 1 strict(x,y,t), 2 spatial(x,y), 3 prefer, 4 repair
 };
 
 inline arguments old_parse_arguments(int argn, char *argc[])
@@ -140,6 +143,8 @@ inline arguments parse_arguments(int argn, char *argc[]){
 		.add_option<std::string>("", "--arch_name", "architecture name", "")
 		.add_option<bool>("", "--lisa_training", "lisa training", false)
 		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
+		.add_option<std::string>("", "--pins", "placement pins file (idx x y t per line)", "")
+		.add_option<int>("", "--pins_mode", "0 off,1 strict,2 spatial,3 prefer,4 repair", 0)
         .parse(argn, argc);
 
 	ret.dfg_filename = args.get_option<std::string>("--dfg");
@@ -160,6 +165,8 @@ inline arguments parse_arguments(int argn, char *argc[]){
 	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");
 	lisa_arg.training = args.get_option<bool>("--lisa_training");
 	lisa_arg.dfg_id = args.get_option<std::string>("--dfg_id");
+	ret.pins_file = args.get_option<std::string>("--pins");
+	ret.pins_mode = args.get_option<int>("--pins_mode");
 	ret.lisa_arg = lisa_arg;
 	assert(ret.dfg_filename!= "");
 	assert(ret.json_file_name!= "");

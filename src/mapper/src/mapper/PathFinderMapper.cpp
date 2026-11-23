@@ -1440,6 +1440,12 @@ bool CGRAXMLCompile::PathFinderMapper::Map(CGRA *cgra, DFG *dfg)
 				std::priority_queue<dest_with_cost> estimatedRoutes;
 				DFGNode *failedNode;
 				isEstRouteSucc = estimateRouting(node, estimatedRoutes, &failedNode);
+				// PINHOOK: honour an externally supplied placement
+				if (isEstRouteSucc && !applyPins(node, estimatedRoutes))
+				{
+					failedNode = NULL;
+					isEstRouteSucc = false;
+				}
 
 				if (!isEstRouteSucc)
 				{

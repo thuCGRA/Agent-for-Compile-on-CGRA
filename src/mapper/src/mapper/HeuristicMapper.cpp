@@ -27,6 +27,114 @@ namespace CGRAXMLCompile
 //
 //}
 
+
+// ===== PINHOOK: external placement pins ==============================
+// The mapper normally owns both placement and scheduling.  When a placement
+// comes from outside (an ILP solve, an annealer, an agent) we only want to
+// constrain *where* a node may land and let the existing A* routing and the
+// existing latency bookkeeping decide the rest.  Filtering the candidate queue
+// right after estimateRouting() is the narrowest place to do that: every
+// candidate already carries a DataPath, i.e. a concrete (PE, phase) pair, and
+// every candidate has already been proven routable from its parents.
+
+bool HeuristicMapper::loadPins(const std::string &path)
+{
+	std::ifstream f(path.c_str());
+	if (!f.is_open())
+	{
+		std::cout << "PIN: cannot open pins file " << path << "\n";
+		return false;
+	}
+	std::string line;
+	while (std::getline(f, line))
+	{
+		std::size_t hash = line.find('#');
+		if (hash != std::string::npos)
+			line = line.substr(0, hash);
+		std::istringstream iss(line);
+		int idx, x, y, t;
+		if (!(iss >> idx >> x >> y >> t))
+			continue;
+		PinEntry e;
+		e.x = x;
+		e.y = y;
+		e.t = t;
+		pins[idx] = e;
+	}
+	pinsTotal = (int)pins.size();
+	std::cout << "PIN: loaded " << pinsTotal << " pin(s) from " << path
+			  << " (mode " << pinsMode << ")\n";
+	return true;
+}
+
+bool HeuristicMapper::applyPins(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes)
+{
+	if (pinsMode == 0 || pins.empty())
+		return true;
+
+	std::map<int, PinEntry>::const_iterator it = pins.find(node->idx);
+	if (it == pins.end())
+	{
+		if (pinsMode == 1)
+		{
+			std::cout << "PIN: node " << node->idx << " (" << node->op
+					  << ") has no pin and pins_mode=strict\n";
+			return false;
+		}
+		return true;
+	}
+
+	const PinEntry &p = it->second;
+	std::vector<dest_with_cost> all;
+	while (!estimatedRoutes.empty())
+	{
+		all.push_back(estimatedRoutes.top());
+		estimatedRoutes.pop();
+	}
+
+	std::vector<dest_with_cost> keep;
+	for (std::size_t i = 0; i < all.size(); ++i)
+	{
+		DataPath *dp = all[i].dest;
+		if (dp == NULL)
+			continue;
+		PE *pe = dp->getPE();
+		if (pe == NULL)
+			continue;
+		if (pe->getPosition_X() != p.x || pe->getPosition_Y() != p.y)
+			continue;
+		// mode 2 is spatial-only: the phase stays the mapper's decision
+		if (pinsMode != 2 && p.t >= 0 && pe->get_t() != p.t)
+			continue;
+		keep.push_back(all[i]);
+	}
+
+	if (keep.empty())
+	{
+		++pinsRejected;
+		if (pinsMode == 3 || pinsMode == 4)
+		{
+			for (std::size_t i = 0; i < all.size(); ++i)
+				estimatedRoutes.push(all[i]);
+			std::cout << "PIN: node " << node->idx << " (" << node->op << ") pin ("
+					  << p.x << "," << p.y << "," << p.t << ") not offered; "
+					  << (pinsMode == 3 ? "prefer" : "repair") << " keeps "
+					  << all.size() << " candidate(s)\n";
+			return true;
+		}
+		std::cout << "PIN: node " << node->idx << " (" << node->op << ") pin ("
+				  << p.x << "," << p.y << "," << p.t << ") not among " << all.size()
+				  << " candidate(s); fail\n";
+		return false;
+	}
+
+	for (std::size_t i = 0; i < keep.size(); ++i)
+		estimatedRoutes.push(keep[i]);
+	++pinsApplied;
+	return true;
+}
+// ===== end PINHOOK ===================================================
+
 } /* namespace CGRAXMLCompile */
 
 void CGRAXMLCompile::HeuristicMapper::SortTopoGraphicalDFG()

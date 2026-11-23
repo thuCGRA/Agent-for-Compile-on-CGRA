@@ -12,6 +12,9 @@
 #include <morpher/arch/CGRA.h>
 #include <morpher/arch/DataPath.h>
 #include <queue>
+#include <map>
+#include <vector>
+#include <string>
 #include <assert.h>
 #include <iostream>
 #include <fstream>
@@ -245,6 +248,21 @@ public:
 	bool dataPathCheck(DataPath *dp, DFGNode *node);
 
 	bool sanityCheck();
+
+	// ---- PINHOOK: external placement pins -------------------------------
+	struct PinEntry
+	{
+		int x;
+		int y;
+		int t; // < 0 => spatial only, phase decided by the mapper
+	};
+	std::map<int, PinEntry> pins;
+	int pinsMode = 0; // 0 off, 1 strict, 2 spatial, 3 prefer, 4 repair
+	int pinsTotal = 0;
+	int pinsApplied = 0;
+	int pinsRejected = 0;
+	bool loadPins(const std::string &path);
+	bool applyPins(DFGNode *node, std::priority_queue<dest_with_cost> &estimatedRoutes);
 
 	bool enableBackTracking = true;
 	bool enableMutexPaths = false;
