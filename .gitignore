@@ -11,3 +11,4 @@ __pycache__/
 
 # patch 应用标记（apply_patch 自己维护，不入库）
 *.patch.applied
+.venv/
