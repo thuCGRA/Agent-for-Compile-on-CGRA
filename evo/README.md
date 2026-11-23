@@ -13,17 +13,29 @@ kernel 不用再调模型。这条线属于 `evo-mapper` 分支。
 ```
 evo/
 ├── cgra.py          DFG XML + arch.json → 演化程序看到的 prob 字典
-├── check.py         资源/相位检查 + 绕路代价（适应度的核心）
-├── harness.py       跑演化程序、算分（II=4 与 II=3 各评一次）
+├── check.py         空间硬约束（完整性/边界/算子-PE 类型/bank 可达/PE 容量）
+├── harness.py       跑演化程序 → 钉进真 mapper → 跑真仿真器 → 打分
 ├── init.py          初始程序（基线贪心放置器，EVOLVE-BLOCK 在此）
 ├── evaluator.py     伐谋要求的 evaluate(path_user_py) 薄壳
+├── table.py         三路对照表：morpher 自己的解 vs 演化程序的解（同口径打分）
+├── disagree.py      静态判定 vs 真 mapper vs 真仿真器的分歧表
+├── verify_against_mapper.py  从 out/<k>/m0/ 抠出 morpher 自己的解放进同一套适应度
+├── verify_end_to_end.py      单个放置的端到端验证（钉 pin → map → sim）
 ├── config.example.yaml  伐谋配置模板（端点/密钥留空）
 ├── config.yaml      由 run.sh 从 credentials.env 生成，**不进仓库**
 └── run.sh           读 credentials.env → 生成 config.yaml → 调 run_famou.py
 ```
 
 `cac` 里的 `facts.py` / `validate.py` 在这条线上被 `cgra.py` / `check.py` 取代：
-前者面向"塞进 prompt 的紧凑事实"，后者面向"能在毫秒内评几万个候选"的适应度。
+前者面向"塞进 prompt 的紧凑事实"，后者面向"能快速筛掉明显非法解"的入场券。
+
+三个辅助脚本回答三个不同的问题：
+
+| 脚本 | 问题 | 输出 |
+|---|---|---|
+| `table.py` | 进化出来的算法比 morpher 自己的差多少？ | 逐 kernel 的 II / lat / 仿真 / 分数，两边同口径 |
+| `disagree.py` | 我们的静态判定错在哪？ | `check` vs `mapper` vs `sim` 三方分歧，标出问题类型 |
+| `verify_against_mapper.py` | 适应度本身可信吗？ | morpher 自己的解在适应度下的分数（天花板） |
 
 ## 二、伐谋的三件套契约
 
@@ -91,10 +103,10 @@ mapper 单次预算 **20 秒**（`harness.MAP_TIMEOUT`）：好的放置 3–4 �
 坏的放置会一路算到 164 秒才放弃（实测 mac 的一次坏放置），超时按"没布通"算。
 一次完整评测（三个 kernel，含 mac 超时）约 **30 秒**。
 
-### 为什么把 router.py 降级
+### 为什么删掉 router.py
 
-`router.py` 是时间扩展图上的自研布线器，静态、毫秒级。它给出的判定与真 mapper
-**系统性不一致**：
+`router.py` 曾是时间扩展图上的自研布线器，静态、毫秒级，用来当"能不能布"的判据。
+它给出的判定与真 mapper **系统性不一致**：
 
 | 对象 | 我们的 router | 真 mapper | 仿真 |
 |---|---|---|---|
@@ -102,12 +114,15 @@ mapper 单次预算 **20 秒**（`harness.MAP_TIMEOUT`）：好的放置 3–4 �
 | 贪心基线（II=4） | 可布 3/3 | 通过 2/3 | 零失配 2/3 |
 | 早期进化最优解 | 可布 3/3 | **通过 0/3** | 未测 |
 
-router 允许"在 PE 寄存器里原地等一拍"（不占链路），这条放宽把大量实际布不出来
-的放置判成可布。**所以 router 只能用来给候选排序，不能当合法性判据。**
-它还留在仓库里作为快速预筛，但适应度不再经过它。
+原因是它允许"在 PE 寄存器里原地等一拍"（不占链路），这条放宽把大量实际布不出来
+的放置判成可布。既然不能当判据、当预筛又会引入偏差，**就删了**（git 历史里还在）。
 
 同理，静态代价（绕路跳数之和）也不能当分数：同一份 II=4 放置，静态分说贪心基线
 处处优于 morpher 自己的解，真跑一遍却是基线在 mac 上布不出来。
+
+这不是一个可以"再修修"的实现细节：任何不建模真实端口仲裁与配置包时序的静态判据，
+都会朝"过于宽松"的方向错，因为放宽一条约束只增加可布解、减少不可布解。用它当适应度
+等于给演化程序发一张空头支票。
 
 ### 校准锚点
 
@@ -201,7 +216,34 @@ token 与耗时（排查"空响应"就看这里：`response_tokens` 撞到 `max_
    `finish_reason=length` 时，带 `extra_body={"thinking": {"type": "disabled"}}`
    再请求一次。
 
-## 七、已知限制
+## 七、结果（截至 2026-11-23，II=4，3 个 kernel）
+
+同一套适应度下的对比（`python evo/table.py`）：
+
+| 对象 | combined | array_add | mac | trmm |
+|---|---|---|---|---|
+| **morpher 自己的解** | **0.845** | lat 11 | lat 10 | lat 6 |
+| 贪心基线 `evo/init.py` | 0.564 | lat 12 | **超时，布不出来** | lat 6 |
+| 进化最优（第 3 轮） | 0.841 | lat 11 | lat 11 | lat 6 |
+
+进化出来的不是一张放置表，而是一个算法（约 380 行）：
+确定性多起点局部搜索，move + swap 邻域，带拥塞项与
+"每块 PE 软上限 2 个节点"。后者是关键：基线把 PE 堆满后，
+mapper 的相位搜索会爆炸——mac 就是这么超时的。
+
+**结论：进化出的算法在这三个 kernel 上与 morpher 自带的 PathFinder 打平**
+（差一拍，且完全没用到 morpher 的启发式）。这不是"比 morpher 更好"，
+而是"一个由 LLM 写出来的简单局部搜索能达到手写启发式的水平"。
+要超过它，需要更强的搜索策略（模拟退火 / 重命名等）或更多的 kernel。
+
+归零的那一代（`1_0_4_202611231115.py`）也值得记一笔：它在
+"bank 行号靠猜 + `MEMORY_OPS` 漏了 OLOAD/OSTORE"的旧模型下得分 0.837，
+模型修正后直接归零（三个 kernel 都非法）。**适应度错了，演化就在优化一个错的目标**——
+而且过程完全看不出异常，分数一路往上走。这是把真 mapper 接进适应度的最大理由。
+
+当前还在跑的实验：8 轮 / 2 岛屿 / 2 worker，每轮 3–6 分钟。
+
+## 八、已知限制
 
 * **每次评测真跑 mapper 与仿真器**，一次约 30 秒（mac 在坏放置上会撞 20 秒超时）。相比纯静态的
   50 ms，这是为了让分数有意义而付的代价；也因此 `max_iterations` 不要开大。
@@ -213,6 +255,6 @@ token 与耗时（排查"空响应"就看这里：`response_tokens` 撞到 `max_
 * **适应度与 mapper 强相关**：同一份放置在上游 PathFinder 与本工程上的结果可能不同
   （`~/cac` 的 mapper 是有行为差异的 fork，`allowed_time_steps_for_connection`
   被改过）。分数只能在**同一份 mapper 二进制**下横向比较。
-* `router.py` 仍在仓库里（毫秒级预筛、候选排序），但**不参与打分**，见第三节。
+* `router.py` 已删除（判定过于宽松，见第三节）；`disagree.py` 保留了三方分歧的对照口径。
 * `map_pinned.sh` 依赖 `-m 3`（PinnedMapper），而该能力目前靠 `scripts/patch_pinned_mapper.py`
   手动打进上游源码，还没落成 `toolchain/patches/0002-*.patch`。
