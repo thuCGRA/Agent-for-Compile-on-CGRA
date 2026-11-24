@@ -220,7 +220,7 @@ def rec_min_ii(nodes, arch):
 
 
 def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
-                    route_cycles_max=1):
+                    route_cycles_max=1, timing="bypass"):
     """Solve placement + scheduling for one II.
 
     An edge u->v costs `L + d` cycles, where `L` is the operator latency and `d`
@@ -229,6 +229,17 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
     pass a register.  `route_cycles_max` caps it; the default of 1 is what the
     mapper's own solutions use (measured over all 23 edges of array_add: the
     residual `(t_v - t_u - L) mod II` is always 0 or 1, regardless of distance).
+
+    `timing` decides who owns the route latency:
+
+    * ``"bypass"`` (HyCUBE, the default) -- a PE output reaches another PE
+      through the crossbars without crossing a register, so ``d`` is free in
+      ``{0, 1}`` and is *independent* of the hop count.  Measured on array_add:
+      ``(hops, d)`` = ``{(0,0):7, (0,1):1, (1,0):5, (1,1):1, (2,0):4, (2,1):3,
+      (3,0):2}`` -- three-hop edges do reach their consumer in the same cycle.
+    * ``"register"`` -- the conventional CGRA where every PE output is
+      registered once, so a route of ``h`` hops costs ``h`` cycles and a
+      same-PE transfer still costs one: ``d == max(h, 1)``.
     """
     from ortools.sat.python import cp_model
 
@@ -239,7 +250,11 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
 
     # Admissible extra route delays.  0 = combinational, 1 = one register.
     # `route_cycles_max >= 2` also admits II-1, the -1 wrap seen on trmm.
-    if route_cycles_max <= 0:
+    if timing == "register":
+        # A route of h hops crosses h registers, and even a same-PE transfer
+        # crosses one, so the admissible delays are exactly 1..max_hops.
+        delay_values = list(range(1, max_hops + 1))
+    elif route_cycles_max <= 0:
         delay_values = [0]
     elif route_cycles_max == 1:
         delay_values = [0, 1]
@@ -345,6 +360,10 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
                         # dd = extra cycles the route consumes: 0 for a purely
                         # combinational path, 1 when a register is crossed.
                         for dd in delay_values:
+                            # register-timed fabric: the route latency is
+                            # fully determined by the hop count.
+                            if timing == "register" and dd != max(hh, 1):
+                                continue
                             tv = (tu + lat + dd + nextiter * ii) % ii
                             tuples.append(
                                 (pe_index[pu], tu, pe_index[pv], tv, hh, dd)
@@ -379,7 +398,8 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
         pins[n.idx] = (pe[0], pe[1], solver.Value(ph_var[n.idx]))
     total_hops = sum(solver.Value(h) for h in hop_vars)
     total_delay = sum(solver.Value(d) for d in delay_vars)
-    return pins, "%-9s hops=%-3d route_cycles=%-3d wall=%.2fs" % (
+    return pins, "%s %-9s hops=%-3d route_cycles=%-3d wall=%.2fs" % (
+        timing,
         name,
         total_hops,
         total_delay,
@@ -398,6 +418,9 @@ def main(argv=None):
                     help="max cycles the route itself may consume (0 = combinational only)")
     ap.add_argument("--time-limit", type=float, default=60.0)
     ap.add_argument("--objective", choices=("hops", "balance"), default="hops")
+    ap.add_argument("--timing", choices=("bypass", "register"), default="bypass",
+                    help="bypass = combinational PE output (HyCUBE); "
+                         "register = one register per hop (conventional CGRA)")
     ap.add_argument("--spatial", action="store_true",
                     help="write t=-1 so the mapper keeps phase ownership")
     ap.add_argument("-o", "--out", default="pins.txt")
@@ -412,7 +435,7 @@ def main(argv=None):
     for ii in range(start, args.max_ii + 1):
         pins, info = build_and_solve(nodes, arch, ii, args.hops,
                                      args.time_limit, args.objective,
-                                     args.route_cycles)
+                                     args.route_cycles, args.timing)
         if pins is None:
             print("II = %-2d  %s" % (ii, info))
             continue

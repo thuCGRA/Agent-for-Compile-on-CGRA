@@ -146,6 +146,35 @@ trmm 的那 1 条例外是 `u=3 -> v=2`（`OLOAD`，`t_u=0, t_v=1, L=2`，残差
   被迫换位置后布线更紧。**ILP 的解不比 PathFinder 好**，这在当前成本模型下是预期的 ——
   模型里没有端口容量、没有链路容量、没有寄存器复用。
 
+## 时序模型：bypass 与 register 两种织物
+
+CP-SAT 里一条边 `u -> v` 的代价是 `L_u + d`，`d` 是**路由本身**吃掉的周期数。
+`d` 能取什么值，取决于织物能不能把 PE 输出组合直通到下一个 PE：
+
+- `--timing bypass`（默认，HyCUBE）：输出可以不经寄存器、穿过 crossbar 直接进下一个 PE，
+  所以 `d` 在 `{0, 1}` 里自由取，**与跳数无关**。在 array_add 基线上量了全部 23 条边，
+  `(hops, d)` 分布 = `{(0,0):7, (0,1):1, (1,0):5, (1,1):1, (2,0):4, (2,1):3, (3,0):2}`
+  —— 3 跳的边同样有 `d = 0`。硬套"每跳一拍"这三条边直接无解。
+- `--timing register`（常规 CGRA）：每个 PE 输出都打一拍，`h` 跳就是 `h` 拍，
+  同 PE 内部也要一拍，故 `d == max(h, 1)`。
+
+实测（II 从 4 起，`--time-limit 45`，`--route-cycles 1`）：
+
+| kernel | timing | CP-SAT | strict 回灌 | prefer 回灌 | 仿真 |
+| --- | --- | --- | --- | --- | --- |
+| array_add | bypass | FEASIBLE hops=10 d=6 | II=4 | II=4 | `243/0` |
+| array_add | register | FEASIBLE hops=19 d=26 | 失败 | II=5 | `243/0` |
+| mac | bypass | FEASIBLE hops=15 d=7 | 失败 | II=4 | `167/0` |
+| mac | register | FEASIBLE hops=26 d=32 | 失败 | II=5 | `167/0` |
+| trmm | bypass | OPTIMAL hops=3 d=5 | 失败 | II=5 | `5/0` |
+| trmm | register | OPTIMAL hops=7 d=13 | 失败 | II=5 | `5/0` |
+
+读法：register 模型的 hops 与 d 都明显更大（array_add 10/6 → 19/26），
+但 II=4 上仍 FEASIBLE —— 说明模型能表达"保守织物"；
+bypass 多出来的自由度正是 HyCUBE 那条组合路径。
+两种模型的解都能被真实 A* 布线 + 仿真接受（prefer 模式），
+所以"是否利用组合直通"目前只影响 II 与拥塞，不影响正确性。
+
 ## 已知限制（别当成 bug 去修）
 
 1. **相位归 mapper 所有**。想在 strict 模式下稳定命中，就得让 CP-SAT 复刻
