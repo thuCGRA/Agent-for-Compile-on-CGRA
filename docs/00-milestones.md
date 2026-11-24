@@ -102,30 +102,50 @@ trmm 在跑满时 cost 26 比 budget=200 的 18 更差，说明它在 149 个温
 
 ---
 
-## M1 · 约束接口（下一步）
+## M1 · 约束接口（已完成，提交 `8eba382`）
 
 目标：让 agent 能"告诉后端该怎么做"，而不是自己给坐标。
 
-- [ ] `--constraints <json>`：`{pins: {idx: [x,y]}, forbidden: {idx: [[x,y],...]}, region: [idx...]}`
-- [ ] PathFinder 候选集裁剪（`~/cac` 的 patch `0002` 有 `restrictDestinations` 可移植）
-- [ ] SA 五个钩子：`selectDFGNodeToUnmap` / `getRandomDPCandidate` / `whetherAcceptNewMapping` / `initMap` / `getCost`
-- [ ] 验收：给定 5 个 pin，mapper 产出位置完全一致；给定 forbidden，mapper 从不落在那里
+- [x] `--constraints <json>`：`{pin_mode, pins: {idx: [x,y]}, forbidden: {idx: [[x,y],...]}}`（patch `0003`）
+- [x] PathFinder 候选集裁剪：`estimateRouting` 里候选生成后、`getLatCandDests` 之前过滤
+- [x] SA 侧同样过滤：`getRandomDPCandidate()` 两处（退火邻域原本完全不受约束，是一半生效的坑）
+- [x] `--sa_seed`（patch `0004`）：上游四个随机点全是真随机源，不钉种子任何对比都不成立
+- [x] SA 空候选表保护（patch `0005`）：约束把候选表过滤空后 `.front()` 是 SIGSEGV，
+      之前一直被误读成"映射失败"
+- [x] 验收：`array_add/mac/trmm × pathfinder/sa` 六格全 PASS（T1 pin 命中 / T1b 单点位移 /
+      T3 forbidden / T4 矛盾拒绝 / T5 双 pin 同 PE 拒绝）
 
-## M2 · Auditor（诊断）
+**M1.5 / M1.5b（见 `docs/02-m15-neighbourhood.md`）**：给 SA 加了 `--sa_select` / `--sa_pick` /
+`--sa_cost_mode` 三个开关并全部实测，结论是**都不值得改**——base 在热启动可行时完全确定，
+启发式的收益落在种子噪声内，换代价函数没有任何 kernel 变好。退火轨迹显示
+300–367 次移动里只有 0–4 次让代价低于热启动，最高代价是热启动的 3.2 倍：
+**上游 SA 的瓶颈是邻域算子结构性无效，不是调参**。
 
-- [ ] `agents/auditor.py`：读 `Attempt` 的失败证据 → `{root_cause, evidence, suggestion}`
-- [ ] 验收：10 个人工注入的错误，根因定位 ≥ 8/10
+## M2 · 诊断 + agent 骨架（已完成，提交 `23ccdb8`，详见 `docs/03-m2-agent.md`）
 
-## M3 · 单 agent 预算曲线
+- [x] `agents/audit.py`：读 `Attempt` 的失败证据 → `{gate, cls, suspects, advice}`
+- [x] 验收：10 个人工注入的错误，根因定位 **10/10**（验收线 ≥8/10）
+- [x] `agents/engine.py` / `agents/policy.py` / `agents/graph.py`（LangGraph `StateGraph`）
+- [x] `experience/store.py`（SQLite `cases` 表）
+- [x] `scripts/m2_agent.py` 四臂对照 + `scripts/m2_audit.py`
+- **M2 的负结果**：pathfinder/sa/scripted/llm 四臂在 3 个 kernel 上，
+  agent 的最好 cost 全部等于 PathFinder 基线，代价是 2–4 倍调用与 10–100 倍墙钟。
 
-- [ ] `agents/orchestrator.py`（LangGraph `StateGraph`）
+## M3 · 预算曲线与真正的动作（下一步）
+
+M2 证明了"选后端/调参"没有赢面，所以 M3 的重点不是加旋钮，而是**加改变搜索空间的动作**：
+
+- [x] `agents/graph.py`（LangGraph `StateGraph`）已就位，可直接复用
+- [ ] **A2 `set_region`**：只让后端动子图（后端加 `--region` 参数，mapper 侧约束候选集）
+- [ ] **A3 更聪明的 `forbidden`**：用失败解的信息构造禁止集，而不是只钉 pins
 - [ ] 主图：横轴 mapper 调用次数 / 墙钟，纵轴合法率 / cost / lat
 - [ ] 对照：PathFinder、修好的 SA、random-restart、固定脚本、agent
 
 ## M4 · 多步放置 + 经验库
 
-- [ ] `experience/store.py`（SQLite）：`dfg_features / arch_features / plan / outcome / conflict_pattern`
-- [ ] 动作 A2（`set_region`）与 A5（`propose_local`，仅 ≤8 节点）
+- [x] `experience/store.py`（SQLite）已在 M2 落地，字段为 `kernel/n_nodes/n_edges/ii/backend/params/ok/cost/lat/gate/cls/note`
+- [ ] 经验检索接入策略（`recall` → prompt 里的"相似实例历史"）
+- [ ] 动作 A5（`propose_local`，仅 ≤8 节点）
 - [ ] 消融：去经验检索 / 去 Auditor / 关 A5 / 单步 vs 多步
 
 ---
