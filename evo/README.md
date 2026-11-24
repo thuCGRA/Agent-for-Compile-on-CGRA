@@ -21,6 +21,7 @@ evo/
 ├── disagree.py      静态判定 vs 真 mapper vs 真仿真器的分歧表
 ├── verify_against_mapper.py  从 out/<k>/m0/ 抠出 morpher 自己的解放进同一套适应度
 ├── verify_end_to_end.py      单个放置的端到端验证（钉 pin → map → sim）
+├── report.py         生成伐谋自带的可视化报告（得分曲线/散点/进化路径）
 ├── config.example.yaml  伐谋配置模板（端点/密钥留空）
 ├── config.yaml      由 run.sh 从 credentials.env 生成，**不进仓库**
 └── run.sh           读 credentials.env → 生成 config.yaml → 调 run_famou.py
@@ -36,6 +37,7 @@ evo/
 | `table.py` | 进化出来的算法比 morpher 自己的差多少？ | 逐 kernel 的 II / lat / 仿真 / 分数，两边同口径 |
 | `disagree.py` | 我们的静态判定错在哪？ | `check` vs `mapper` vs `sim` 三方分歧，标出问题类型 |
 | `verify_against_mapper.py` | 适应度本身可信吗？ | morpher 自己的解在适应度下的分数（天花板） |
+| `report.py` | 这次演化到底怎么走的？ | 可交互的 HTML 报告（曲线 + 散点 + LLM 写的进化叙事） |
 
 ## 二、伐谋的三件套契约
 
@@ -252,7 +254,26 @@ mapper 的相位搜索会爆炸——mac 就是这么超时的（实测单次 16
 而且过程完全看不出异常：分数一路从 0.56 涨到 0.84，每一步都“有改进”。
 这是把真 mapper 接进适应度的最大理由：只有真工具能发现"模型说合法、硬件说不行"。
 
-## 八、已知限制
+## 八、可视化报告
+
+伐谋自带报告生成器（`~/famou-v2/api_server/report.py`），把一个实验目录变成
+一张可交互的 HTML 面板：得分曲线、每个程序的散点、最优路径连线，
+加上一段由 LLM 写的“这次搜索到底怎么走的”叙事（`evolution_map`）。
+
+```bash
+python evo/report.py                       # 最新一个实验
+python evo/report.py --exp famou_data/<exp>
+python evo/report.py --out out/report      # 默认就是这个
+```
+
+产出 `out/report/data.json`（聚合数据）与 `out/report/report.html`（自包含，无需服务器）。
+报告里的叙事是真调用 LLM 生成的，所以跑一次要一分钟左右。
+
+报告需要三样东西：实验目录（`programs/*.json` + `experiment_checkpoint_*.json`）、
+一个 LLM 端点（叙事是生成的，不是模板）、一个输出目录。
+端点读的是同一份 `~/.config/cgra_agent/credentials.env`，所以不用另外填。
+
+## 九、已知限制
 
 * **每次评测真跑 mapper 与仿真器**，一次约 30 秒（mac 在坏放置上会撞 20 秒超时）。相比纯静态的
   50 ms，这是为了让分数有意义而付的代价；也因此 `max_iterations` 不要开大。

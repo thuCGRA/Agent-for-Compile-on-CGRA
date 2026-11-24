@@ -18,3 +18,5 @@ famou_data/
 famou_data_mock/
 famou_*.log
 evo/config.mapper.yaml
+out/report/
+famou_data/*/report.html
