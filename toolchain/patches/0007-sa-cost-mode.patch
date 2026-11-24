@@ -1,0 +1,92 @@
+diff -ruN /tmp/snap6/mapper/include/morpher/mapper/SimulatedAnnealingMapper.h /tmp/snap7/mapper/include/morpher/mapper/SimulatedAnnealingMapper.h
+--- a/include/morpher/mapper/SimulatedAnnealingMapper.h	2026-11-24 05:12:52.226649177 +0000
++++ b/include/morpher/mapper/SimulatedAnnealingMapper.h	2026-11-24 05:12:52.250649124 +0000
+@@ -45,6 +45,8 @@
+ 	// 1 = 有依据的挑选。默认 0，保证 M0/M1 的结论不被悄悄改掉。
+ 	int selectStrategy = 0;
+ 	int pickStrategy = 0;
++	int costMode = 0;
++	int getWireLength();
+ 
+ 	// 一个节点"有多该被挪"：所在 PE 上还挤了几个节点 + 已布线边上多绕了几跳。
+ 	// 只用现在就能算的信息，不假装知道布线能不能通（那要 SARoute 才知道）。
+diff -ruN /tmp/snap6/mapper/include/morpher/util/util.h /tmp/snap7/mapper/include/morpher/util/util.h
+--- a/include/morpher/util/util.h	2026-11-24 05:12:52.226649177 +0000
++++ b/include/morpher/util/util.h	2026-11-24 05:12:52.250649124 +0000
+@@ -52,6 +52,7 @@
+ 	bool sa_optimize = false;
+ 	int sa_select = 0;   // M1.5: 0=上游随机 1=按 blame 挑节点
+ 	int sa_pick = 0;     // M1.5: 0=上游洗牌取首个 1=按距离排序
++	int sa_cost_mode = 0; // 0: upstream (port_usage)  1: wire length
+ 	int sa_budget = 0;
+ 	// M1: 约束文件（JSON），空表示无约束
+ 	std::string constraints_file; // 移动次数上限，0 = 不限（上游行为）
+@@ -154,6 +155,7 @@
+ 		.add_option<bool>("", "--sa_optimize", "SA: keep annealing after feasibility and return the cheapest valid snapshot", false)
+ 		.add_option<int>("", "--sa_select", "SA: node selection 0=random(upstream) 1=blame-ranked", 0)
+ 		.add_option<int>("", "--sa_pick", "SA: candidate pick 0=shuffle(upstream) 1=distance-ranked", 0)
++		.add_option<int>("", "--sa_cost_mode", "cost function: 0=upstream(port_usage), 1=total wire length", 0)
+ 		.add_option<int>("", "--sa_budget", "SA: max number of moves (0 = unlimited)", 0)
+ 		.add_option<std::string>("", "--constraints", "JSON file with pins/forbidden (M1)", "")
+ 		.add_option<std::string>("", "--arch_name", "architecture name", "")
+@@ -179,6 +181,7 @@
+ 	ret.sa_optimize = args.get_option<bool>("--sa_optimize");
+ 	ret.sa_select = args.get_option<int>("--sa_select");
+ 	ret.sa_pick = args.get_option<int>("--sa_pick");
++	ret.sa_cost_mode = args.get_option<int>("--sa_cost_mode");
+ 	ret.sa_budget = args.get_option<int>("--sa_budget");
+ 	ret.constraints_file = args.get_option<std::string>("--constraints");
+ 	ret.use_json = true;
+diff -ruN /tmp/snap6/mapper/src/CGRA_xml_compiler.cpp /tmp/snap7/mapper/src/CGRA_xml_compiler.cpp
+--- a/src/CGRA_xml_compiler.cpp	2026-11-24 05:12:52.226649177 +0000
++++ b/src/CGRA_xml_compiler.cpp	2026-11-24 05:12:52.250649124 +0000
+@@ -93,6 +93,7 @@
+ 		static_cast<SAMapper *>(mapper)->optimizeAfterFeasible = args.sa_optimize;
+ 		static_cast<SAMapper *>(mapper)->selectStrategy = args.sa_select;
+ 		static_cast<SAMapper *>(mapper)->pickStrategy = args.sa_pick;
++		static_cast<SAMapper *>(mapper)->costMode = args.sa_cost_mode;
+ 		static_cast<SAMapper *>(mapper)->moveBudget = args.sa_budget;
+ 		
+ 		// assert(false && "convert to SA");
+diff -ruN /tmp/snap6/mapper/src/mapper/SimulatedAnnealingMapper.cpp /tmp/snap7/mapper/src/mapper/SimulatedAnnealingMapper.cpp
+--- a/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-24 05:12:52.226649177 +0000
++++ b/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-24 05:12:52.250649124 +0000
+@@ -799,14 +799,36 @@
+ 	return usage_number;
+ }
+ 
++// total hop count over all currently routed edges.
++// Each entry of data_routing_path is the A*-found path for one DFG edge;
++// consecutive LatPort elements are the PE hops it takes.
++int CGRAXMLCompile::SAMapper::getWireLength()
++{
++	int wire = 0;
++	for (auto &kv : data_routing_path)
++	{
++		const std::vector<LatPort> &path = kv.second;
++		if (path.size() > 1)
++			wire += (int)path.size() - 1;
++	}
++	return wire;
++}
++
+ int CGRAXMLCompile::SAMapper::getCost()
+ {
+ 	int unmapped_node_number = getNumberOfUnmappedNodes();
+ 	int port_usage = getPortUsage();
+ 	int congestion_number = getCongestionNumber();
+ 	int conflict_number = getConflictNumber();
+-	int total_cost = unmapped_node_number * 100 + congestion_number * 10 + conflict_number * 10 + port_usage;
+-	LOG(COST) << "unmapped node:" << unmapped_node_number << " port usage:" << port_usage << " congestion:" << congestion_number << " total cost:" << total_cost << "\n";
++	// costMode 1: replace port_usage with wire length.
++	// The upstream cost has no delay/detour term at all, so once the warm start
++	// is feasible there is nothing left to minimise and the annealer spins.
++	int wire = getWireLength();
++	int shaping = (costMode == 1) ? wire : port_usage;
++	int total_cost = unmapped_node_number * 100 + congestion_number * 10 + conflict_number * 10 + shaping;
++	LOG(COST) << "unmapped node:" << unmapped_node_number << " port usage:" << port_usage
++	          << " wire:" << wire << " congestion:" << congestion_number
++	          << " total cost:" << total_cost << "\n";
+ 	return total_cost;
+ }
+ 

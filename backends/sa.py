@@ -17,7 +17,7 @@ class SABackend(Backend):
 
     def run(self, prob, ii, hints=None, workdir=None, timeout=3600.0, root=None,
             force_anneal=False, optimize=False, budget=0, max_ii=None,
-            select=0, pick=0):
+            select=0, pick=0, cost_mode=0):
         hints = hints or Hints()
         # M1.5: 种子必须显式传。上游 SA 用 std::random_device（真随机源）挑节点、
         # 洗候选表，同一输入两次跑出不同映射——不钉住种子，任何"agent vs SA"
@@ -35,6 +35,9 @@ class SABackend(Backend):
             extra.extend(["--sa_select", str(int(select))])
         if pick:
             extra.extend(["--sa_pick", str(int(pick))])
+        # M1.5b: 代价函数。0 = 上游（port_usage），1 = 已布线边总跳数。
+        if cost_mode:
+            extra.extend(["--sa_cost_mode", str(int(cost_mode))])
         run = mapper_mod.run_mapper(
             prob["kernel"], backend=self.name, ii=ii,
             xdim=prob["xdim"], ydim=prob["ydim"],
@@ -49,7 +52,7 @@ class SABackend(Backend):
             artifacts={"workdir": run.workdir, "binary": run.binary},
             raw={"result_txt": run.result_txt, "force_anneal": force_anneal,
                  "optimize": optimize, "budget": budget, "maprun": run,
-                 "select": select, "pick": pick,
+                 "select": select, "pick": pick, "cost_mode": cost_mode,
                  "hints": hints.note or "",
                  "constrained": bool(hints.pins or hints.forbidden)},
         )

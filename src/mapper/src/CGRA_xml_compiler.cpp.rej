@@ -1,0 +1,12 @@
+--- src/CGRA_xml_compiler.cpp
++++ src/CGRA_xml_compiler.cpp
+@@ -88,6 +88,9 @@ int main(int argn, char *argc[])
+ 		mapper = new PathFinderMapper(inputDFG_filename);
+ 	}else if(mapping_method  == 1){
+ 		mapper = new SAMapper(inputDFG_filename);
++		static_cast<SAMapper *>(mapper)->forceAnneal = args.sa_force_anneal;
++		static_cast<SAMapper *>(mapper)->optimizeAfterFeasible = args.sa_optimize;
++		static_cast<SAMapper *>(mapper)->moveBudget = args.sa_budget;
+ 		
+ 		// assert(false && "convert to SA");
+ 	}else if(mapping_method  == 2){

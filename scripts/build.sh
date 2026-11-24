@@ -74,6 +74,7 @@ apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0003-mapper-constraints.patch
 apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0004-sa-seed.patch"
 apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0005-sa-empty-candidate-guard.patch"
 apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0006-sa-neighbour-strategies.patch"
+apply_patch "$SRC/mapper" "$ROOT/toolchain/patches/0007-sa-cost-mode.patch"
 cmake -S "$SRC/mapper" -B "$ROOT/build/mapper" -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER="$GCC" -DCMAKE_CXX_COMPILER="$GXX" \
   -DCMAKE_C_FLAGS="$HOSTFLAGS" -DCMAKE_CXX_FLAGS="$HOSTFLAGS" \

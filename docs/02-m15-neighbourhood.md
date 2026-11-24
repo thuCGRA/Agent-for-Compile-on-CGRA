@@ -1,8 +1,12 @@
-# M1.5：两个邻域算子值不值得改
+# M1.5 / M1.5b：SA 的邻域算子与代价函数，都不值得改
 
-**结论先说：不值得——至少不是这样改。** 手写的两个启发式没有一个能稳定改善质量，
-而实验暴露出一个更根本的问题：**上游 SA 的 `getCost()` 里没有延迟/绕行，它优化的目标
-和我们要的不是一个东西。不修这个，agent 拧任何旋钮都只是在噪声里晃。**
+**结论先说：两个手写邻域算子没用，换代价函数也没用。** 三次实验把原因逼到了同一处——
+**退火本身在空转**：单节点重定位这个邻域算子几乎总把代价推高 3 倍，300 次移动里
+只有 4 次比热启动便宜，最好的一次只便宜 1 点。所以 agent 如果在"调 SA 的旋钮"
+上做决策，上限就是热启动（= PathFinder），没有增益。
+
+**能改变结果的只有改问题结构的动作**：区域分解（A2 `set_region`）与硬约束
+（A3 `constrain`，M1 已可用）。这决定了 M2/M3 的决策粒度。
 
 ## 1. 改了什么
 
@@ -105,16 +109,76 @@ SELECT 同拍双操作数冲突（`CGRATile.cpp:168` 的 `assert(!(I1isvalid && 
 
 具体做法：加 `--sa_cost_mode`，mode 1 时把 `getCost()` 的 `port_usage` 换成
 **已布线边的总跳数**（`data_routing_path` 里每条路径的 `hops` 累加，C++ 侧可直接算）。
-这一个改动同时解决三件事：① SA 有了真正的优化目标 ② agent 的 `budget`/`seed`/`select`/`pick`
-四个旋钮才第一次有意义 ③ 我们的 cost 与 SA 的 cost 对齐，才能谈"agent 让 SA 更快收敛"。
 
-## 5. 复现
+## 5. 把目标换掉之后：还是没有改善（patch 0007，`--sa_cost_mode`）
+
+`toolchain/patches/0007-sa-cost-mode.patch`（92 行）加了 `--sa_cost_mode`：
+mode 1 时 `getCost()` 返回 `unmapped*100 + congestion*10 + conflict*10 + getWireLength()`，
+`getWireLength()` = `data_routing_path` 里每条路径 `path.size()-1` 的总和。
+
+`scripts/m15b_costmode.py`（II=4，budget=1000，三种子）：
+
+| kernel | mode 0（上游 port_usage） | mode 1（总跳数） |
+|---|---|---|
+| array_add | 36 / 36 / 36，lat 11 | **36 / 36 / 36，lat 11** |
+| trmm | 20 / 18 / 18，lat 6–7 | **18 / 18 / 18，lat 6** |
+| mac | 3/3 G1 fail | **3/3 G1 fail** |
+
+换目标只把 trmm 的一个种子从 20 修到 18（就是回到热启动），**没有任何一个 kernel 变好**。
+于是问题不在"目标错了"，在更下面一层。
+
+## 6. 直接看退火轨迹：单点移动几乎总是把代价推高三倍
+
+用 `COST=1` 打开 `getCost()` 的日志，跑 array_add（budget=300，seed 20136），统计每次移动的代价：
+
+| | mode 0 | mode 1 |
+|---|---|---|
+| `getCost` 调用次数 | 357 | 367 |
+| 热启动代价（第一次） | 167 | 165 |
+| 全程最低代价 | 166 | **165（一次都没降）** |
+| 全程最高代价 | **538** | **536** |
+| 比热启动更低的移动次数 | **4 / 357** | **0 / 367** |
+
+**这就是根因，且与目标函数无关**：一次"搬走一个节点 + 重新路由它所有边"的移动，
+绝大多数时候把总代价推到热启动的 **3 倍**（538 vs 167）。300 多次移动里只有 4 次
+比热启动便宜，最好的也只便宜 **1 点**。
+
+上游 SA 在 3 个 kernel 上不是"搜索能力弱"，是**邻域算子结构性无效**：
+PathFinder 的贪心热启动已经在一个单点移动的局部最优上，单节点随机重定位
+既逃不出去（温度不够高、接受率 0.01）也找不到更好的点。
+
+## 7. 结论：agent 的价值不在"调 SA 的旋钮"
+
+三条链合起来说明一件事：
+
+1. `budget`（M0）、`seed`（M1.5）、`select`/`pick`（M1.5）、`cost_mode`（M1.5b）
+   —— 这五个旋钮在 3 个 kernel 上都**换不来质量**，因为退火本身空转；
+2. 换目标不改结构：邻域算子决定了"一步能到哪"，而它一步只能到更差的地方；
+3. 所以 agent 如果只在"选哪个后端 / 给多少预算 / 用什么目标"上做决策，
+   **上限就是热启动（= PathFinder）**，也就是没有增益。
+
+能改变结果的只有**改问题结构**的两类动作：
+
+| 动作 | 为什么可能有用 |
+|---|---|
+| **A2 `set_region`（区域分解）** | 固定大部分节点，让 mapper 只重排一个小子图（≤8 节点）。搜索空间小到能被真解开，而不是在 22 个节点上随机游走。这正是笔记里"多步放置降低搜索空间"的原意。 |
+| **A3 `constrain`（pins / forbidden）** | M1 已验证可用（6 格全 PASS）。把"该往哪走"变成硬信息喂给 mapper，替代随机试探。 |
+
+这两条也是后续 M2/M3 的主线：agent 的决策粒度落在"拆哪一块、钉哪些点"，
+而不是"给 SA 调参"。
+
+## 8. 复现
 
 ```bash
 export ACC_THU_ROOT=/home/sutong/acc-thu-agent
 python scripts/m15_neighbours.py --budget 1000 --json work/m15_b1000.json
 python scripts/m15_seednoise.py --kernel array_add --kernel mac --kernel trmm \
     --seeds 20136,7,99 --budget 1000 --json work/m15_seednoise.json
+python scripts/m15b_costmode.py --seeds 20136,7,99 --budget 1000 --json work/m15b_costmode.json
+
+# 退火轨迹（直接调 mapper，COST=1 才有 getCost 日志）
+COST=1 out/cgra_xml_mapper -d dfg.xml -j arch.json -x 4 -y 4 -i 4 -t HyCUBE_4REG \
+    -m 1 --sa_seed 20136 --sa_force_anneal --sa_optimize --sa_budget 300 --sa_cost_mode 1
 ```
 
-产物 `out/cgra_xml_mapper` sha256 `58aead670c999b5f456fc4a38e7df4c1e6fcab279a5787ad8da7659b9fa43b73`。
+产物 `out/cgra_xml_mapper` sha256（含 0007）`9b8e01f0d6ff4359f43a6f3df74c6546540dedc7d56a10b80fc796176ad67f09`。
