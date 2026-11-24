@@ -16,7 +16,8 @@
 
 ```bash
 bash scripts/build.sh        # 编译三件套 → out/
-bash scripts/run_all.sh      # 三个 kernel 端到端跑一遍（约 22 s）
+bash scripts/run_all.sh                    # kernels.tsv 里全部 48 个
+bash scripts/run_all.sh array_add mac trmm  # 只跑指定的几个（约 22 s）
 ```
 
 `run_all.sh` 的输出（在 `sutong_103:~/acc-thu` 上实测）：
@@ -39,7 +40,7 @@ acc-thu/
 │   ├── mapper/          布局布线（上游 Morpher_CGRA_Mapper，去掉 applications/json_arch）
 │   └── simulator/       周期级仿真器（上游 hycube_simulator/src）
 ├── arch/                硬件描述（ADL JSON）        → docs/01-architecture.md
-├── kernels/             三个 C 内核 + kernels.tsv
+├── kernels/             48 个上游 testcase + benchmarks.tsv / kernels.tsv
 ├── scripts/             全流程 bash，每个脚本只做一件事
 ├── toolchain/
 │   ├── patches/         对上游源码的全部改动（目前只有 1 个 2 行的 patch）
@@ -66,15 +67,45 @@ acc-thu/
 
 ## kernel 清单
 
-`scripts/kernels.tsv` 三列：`kernel<EOTAB>函数名<EOTAB>来源`。
+上游 Morpher 的全部 testcase 都已装进来：**48 个**（按内容 sha256 去重后的数量；
+`polybench/trmm/` 下 12 个是 `polybench/` 根目录同名文件的逐字节副本，已略去）。
 
-| kernel | 被映射的函数 | 说明 |
+* `scripts/benchmarks.tsv` —— 权威清单，三列 `kernel<TAB>函数名<TAB>上游相对路径`，
+  并标了每个 case 属于哪一组（cgrame / morpher / opencgra / pace / woset）。
+* `scripts/kernels.tsv` —— 由它生成的、`run_all.sh` 实际迭代的两列表。
+* `bash scripts/install_benchmarks.sh` —— 按清单从上游重新拷一遍（幂等）。
+
+| 组 | kernel | 说明 |
 |---|---|---|
-| `array_add` | `array_add` | 20 节点，C[i]=A[i]+B[i]，最小完整例子 |
-| `mac` | `main` | 22 节点，循环写在 `main` 里，所以函数名是 `main` |
-| `trmm` | `trmm` | 11 节点（DFG 跨外层循环切出来的一段）|
+| morpher_benchmarks | `array_add` `array_cond` `hpcg` `trmm` | 上游 `run_all.sh` 的四个主力 |
+| cgrame_microbench | `mac` `mac2` `sum` `conv2` `conv3` `mults1` `mults2` | 循环都写在 `main` 里，所以 `-fn main` |
+| opencgra_benchmarks | `fir` | 源文件叫 `kernel.c`，函数名 `kernel` |
+| pace_benchmarks | `gemm` `conv2d_2x2` `conv2d_3x3` | `conv2d` 的两个滤波尺寸是两份不同源文件 |
+| woset / gemm | `gemm_w1` `gemm_w2` `gemm_w3` | 三档 SIZE，源文件都叫 `gemm.c` |
+| woset / microspeech | `microspeech_1..4` | 要 `param_conv.txt` / `param_fc.txt` 和 `kernels/microspeech_test_data/` |
+| woset / polybench | `pb_2mm` … `pb_trmm_u`（26 个） | **上游 DFG pass 不支持**，见下 |
 
-`kernels/<k>/<k>.c` 与上游 `Morpher_DFG_Generator/benchmarks/` 下的文件逐字节相同。
+`kernels/<k>/<k>.c` 与上游 `Morpher_DFG_Generator/benchmarks/` 下的文件逐字节相同
+（`install_benchmarks.sh` 只做拷贝，不改内容）。
+
+### 实测：22 个能跑通 DFG，16 个端到端零失配
+
+`bash scripts/run_all.sh` 在 48 个 case 上的实测（II 由 mapper 从 RecMinII 起搜，
+method 0 = 上游 PathFinder）：
+
+| 结果 | 数量 | kernel |
+|---|---|---|
+| 端到端通过（`Mismatches::0`） | **16** | array_add array_cond trmm mac mac2 sum conv2 conv3 mults2 fir gemm conv2d_2x2 conv2d_3x3 gemm_w1 gemm_w2 gemm_w3 |
+| DFG/映射通过、仿真有失配 | 5 | hpcg(1) mults1(4) microspeech_1(无结果行) microspeech_2(4) microspeech_4(502) |
+| 映射失败 | 1 | microspeech_3 |
+| **DFG pass 不支持** | **26** | 全部 `pb_*`（polybench） |
+
+polybench 那 26 个的源码用 `volatile int **A; A[i][k]` 这种二级指针，而上游 DFG pass
+假定每次访存的基址都是"命名数组上的 GEP"，遇到 `int**` 会在
+`DFG::UpdateSPMAllocation` 里对空指针解引用。本工程把那里改成 `report_fatal_error`
+并给出可读提示（而不是段错误），同时保留 `DFG::getTransferVariables` /
+`DFG::SetBasePointers` 里的空指针防御。**这不是把 polybench 跑通**：静态 SPM 地址模型
+本来就没法表达动态二级指针。要用 polybench 得先把数组展平成一维（`int *A`）。
 
 ## 三件套版本
 

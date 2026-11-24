@@ -1,0 +1,63 @@
+# Morpher 上游全部 testcase 清单（唯一内容去重后 48 个）
+#
+# 三列，TAB 分隔：
+#   kernel     本工程 kernels/<kernel>/<kernel>.c 的名字（也是 out/<kernel>/ 的名字）
+#   function   DFG pass 的 -fn 参数 = 含 please_map_me() 的那个函数
+#   source     上游 Morpher_DFG_Generator/benchmarks/ 下的相对路径
+#
+# 去重规则：内容 sha256 相同的只保留一个。polybench/trmm/ 下那 12 个是
+# polybench/ 根目录同名文件的逐字节副本，已略去（polybench/trmm/trmm.c 本身
+# 与 polybench/trmm_unroll/trmm.c 不同，保留）。
+#
+# 重新部署：scripts/install_benchmarks.sh [工程根目录]
+# 上游根目录默认 ~/morpher，可用 MORPHER_HOME 覆盖。
+#
+# kernel	function	source
+array_add	array_add	morpher_benchmarks/array_add/array_add.c
+array_cond	array_cond	morpher_benchmarks/array_cond/array_cond.c
+hpcg	hpcg	morpher_benchmarks/hpcg/hpcg.c
+trmm	trmm	morpher_benchmarks/trmm/trmm.c
+mac	main	cgrame_microbench/mac/mac.c
+mac2	main	cgrame_microbench/mac2/mac2.c
+sum	main	cgrame_microbench/sum/sum.c
+conv2	main	cgrame_microbench/conv2/conv2.c
+conv3	main	cgrame_microbench/conv3/conv3.c
+mults1	main	cgrame_microbench/mults1/mults1.c
+mults2	main	cgrame_microbench/mults2/mults2.c
+fir	kernel	opencgra_benchmarks/fir/kernel.c
+gemm	gemm	pace_benchmarks/gemm/gemm_no_unroll_flattened/gemm.c
+conv2d_2x2	convolution2d	pace_benchmarks/conv2d/no_unroll_2x2_filt/convolution2d.c
+conv2d_3x3	convolution2d	pace_benchmarks/conv2d/no_unroll_3x3_filt/convolution2d.c
+gemm_w1	gemm	woset_benchmarks/gemm_1/gemm.c
+gemm_w2	gemm	woset_benchmarks/gemm_2/gemm.c
+gemm_w3	gemm	woset_benchmarks/gemm_3/gemm.c
+microspeech_1	microspeech_conv_layer_hycube	woset_benchmarks/microspeech_1/microspeech.c
+microspeech_2	microspeech_conv_layer_hycube	woset_benchmarks/microspeech_2/microspeech.c
+microspeech_3	microspeech_conv_layer_hycube	woset_benchmarks/microspeech_3/microspeech.c
+microspeech_4	microspeech_conv_layer_hycube	woset_benchmarks/microspeech_4/microspeech.c
+pb_2mm	main	woset_benchmarks/polybench/2mm/2mm.c
+pb_2mm_u	main	woset_benchmarks/polybench/2mm_unroll/2mm.c
+pb_atax	main	woset_benchmarks/polybench/atax/atax.c
+pb_atax_u	main	woset_benchmarks/polybench/atax_unroll/atax.c
+pb_bicg	main	woset_benchmarks/polybench/bicg/bicg.c
+pb_bicg_u	main	woset_benchmarks/polybench/bicg_unroll/bicg.c
+pb_cholesky	main	woset_benchmarks/polybench/cholesky/cholesky.c
+pb_cholesky_u	main	woset_benchmarks/polybench/cholesky_unroll/cholesky.c
+pb_doitgen	main	woset_benchmarks/polybench/doitgen/doitgen.c
+pb_doitgen_u	main	woset_benchmarks/polybench/doitgen_unroll/doitgen.c
+pb_gemm	main	woset_benchmarks/polybench/gemm/gemm.c
+pb_gemm_u	main	woset_benchmarks/polybench/gemm_unroll/gemm.c
+pb_gemver	main	woset_benchmarks/polybench/gemver/gemver.c
+pb_gemver_u	main	woset_benchmarks/polybench/gemver_unroll/gemver.c
+pb_gesummv	main	woset_benchmarks/polybench/gesummv/gesummv.c
+pb_gesummv_u	main	woset_benchmarks/polybench/gesummv_unroll/gesummv.c
+pb_mvt	main	woset_benchmarks/polybench/mvt/mvt.c
+pb_mvt_u	main	woset_benchmarks/polybench/mvt_unroll/mvt.c
+pb_symm	main	woset_benchmarks/polybench/symm/symm.c
+pb_symm_u	main	woset_benchmarks/polybench/symm_unroll/symm.c
+pb_syr2k	main	woset_benchmarks/polybench/syr2k/syr2k.c
+pb_syr2k_u	main	woset_benchmarks/polybench/syr2k_unroll/syr2k.c
+pb_syrk	main	woset_benchmarks/polybench/syrk/syrk.c
+pb_syrk_u	main	woset_benchmarks/polybench/syrk_unroll/syrk.c
+pb_trmm	main	woset_benchmarks/polybench/trmm/trmm.c
+pb_trmm_u	main	woset_benchmarks/polybench/trmm_unroll/trmm.c

@@ -1,5 +1,7 @@
-set(CMAKE_C_COMPILER "gcc-7")
-set(CMAKE_CXX_COMPILER "/usr/bin/g++-7")
+# 上游硬编码 gcc-7 / /usr/bin/g++-7；改由 -DCMAKE_C(XX)_COMPILER 指定
+# （必须是 GCC 7.5：GCC 13 编出来解析 ADL JSON 会 latent UB → SIGSEGV）
+# set(CMAKE_C_COMPILER "gcc-7")
+# set(CMAKE_CXX_COMPILER "/usr/bin/g++-7")
 
 FILE(GLOB_RECURSE MyCPPSources *.cpp)
 FILE(GLOB_RECURSE MyHSources *.h)

@@ -10844,9 +10844,18 @@ void DFG::getTransferVariables(std::unordered_set<Value *> &outer_vals,
 				else{
 					LLVM_DEBUG(dbgs()<<"ld_ptr:" );
 					LLVM_DEBUG(ld_ptr->dump());
-					assert(gep_derivatives.find(ld_ptr) != gep_derivatives.end());
-					mem_ptrs[ld_ptr] = gep_derivatives[ld_ptr];
-					acc[gep_derivatives[ld_ptr]->getPointerOperand()] = acc[gep_derivatives[ld_ptr]->getPointerOperand()] + 1;
+					// morpher-THU fix: with multi-level pointers (e.g. `int **A; A[i][k]`)
+					// ld_ptr is not a GEP, so it is absent from gep_derivatives. Upstream
+					// only asserts here; in a Release build (NDEBUG) the assert is compiled
+					// away and the lookup yields nullptr -> getPointerOperand() segfaults.
+					// Skip the base-pointer accounting for such nodes instead of dying.
+					auto gd = gep_derivatives.find(ld_ptr);
+					if (gd == gep_derivatives.end() || gd->second == nullptr) {
+						LLVM_DEBUG(dbgs() << "  no gep derivative for this pointer, skipped\n");
+						continue;
+					}
+					mem_ptrs[ld_ptr] = gd->second;
+					acc[gd->second->getPointerOperand()] = acc[gd->second->getPointerOperand()] + 1;
 				}
 
 			}
@@ -10860,9 +10869,13 @@ void DFG::getTransferVariables(std::unordered_set<Value *> &outer_vals,
 					acc[STI->getPointerOperand()] = acc[STI->getPointerOperand()] + 1;
 				}
 				else{
-					assert(gep_derivatives.find(st_ptr) != gep_derivatives.end());
-					mem_ptrs[st_ptr] = gep_derivatives[st_ptr];
-					acc[gep_derivatives[st_ptr]->getPointerOperand()] = acc[gep_derivatives[st_ptr]->getPointerOperand()] + 1;
+					// same guard as the load branch above
+					auto gd = gep_derivatives.find(st_ptr);
+					if (gd == gep_derivatives.end() || gd->second == nullptr) {
+						continue;
+					}
+					mem_ptrs[st_ptr] = gd->second;
+					acc[gd->second->getPointerOperand()] = acc[gd->second->getPointerOperand()] + 1;
 				}
 
 			}
@@ -10965,9 +10978,8 @@ void DFG::SetBasePointers(std::unordered_set<Value *> &outer_vals,
 					array_pointer_sizes[pointer->getName().str()] = sizeArrMap[pointer->getName().str()];
 					node->setArrBasePtr(pointer->getName().str());
 				}
-				else{
-					assert(mem_ptrs.find(pointer) != mem_ptrs.end());
-
+				else if (mem_ptrs.find(pointer) != mem_ptrs.end() && mem_ptrs[pointer] != nullptr)
+				{
 					std::string base_ptr_name = mem_ptrs[pointer]->getPointerOperand()->getName();
 					node->setArrBasePtr(base_ptr_name);
 
@@ -10982,6 +10994,14 @@ void DFG::SetBasePointers(std::unordered_set<Value *> &outer_vals,
 						array_pointer_sizes[base_ptr_name] = DL.getTypeAllocSize(PT->getElementType());
 					}
 				}
+				else
+				{
+					// morpher-THU fix: multi-level pointer (int **A; A[i][k]) — no gep
+					// derivative was recorded for this operand, so there is no base
+					// pointer to attribute. Leave the node without one instead of
+					// dereferencing a null GetElementPtrInst*.
+					LLVM_DEBUG(dbgs() << "  no base pointer for this load, skipped\n");
+				}
 			}
 			else if (StoreInst *STI = dyn_cast<StoreInst>(node->getNode()))
 			{
@@ -10990,9 +11010,8 @@ void DFG::SetBasePointers(std::unordered_set<Value *> &outer_vals,
 					array_pointer_sizes[pointer->getName().str()] = sizeArrMap[pointer->getName().str()];
 					node->setArrBasePtr(pointer->getName().str());
 				}
-				else{
-					assert(mem_ptrs.find(pointer) != mem_ptrs.end());
-
+				else if (mem_ptrs.find(pointer) != mem_ptrs.end() && mem_ptrs[pointer] != nullptr)
+				{
 					std::string base_ptr_name = mem_ptrs[pointer]->getPointerOperand()->getName();
 					node->setArrBasePtr(base_ptr_name);
 
@@ -11006,6 +11025,11 @@ void DFG::SetBasePointers(std::unordered_set<Value *> &outer_vals,
 						PointerType *PT = cast<PointerType>(mem_ptrs[pointer]->getPointerOperand()->getType());
 						array_pointer_sizes[base_ptr_name] = DL.getTypeAllocSize(PT->getElementType());
 					}
+				}
+				else
+				{
+					// morpher-THU fix: same guard as the load branch above
+					LLVM_DEBUG(dbgs() << "  no base pointer for this store, skipped\n");
 				}
 			}
 			else
@@ -11381,7 +11405,15 @@ void DFG::UpdateSPMAllocation(std::unordered_map<Value *, int> &spm_base_address
 					LLVM_DEBUG(dbgs() << "\t to address " << spm_base_address[ptr] << "\n");
 				}
 
-				assert(arr_ptrs.find(ptr) != arr_ptrs.end());
+				// morpher-THU fix: multi-level pointer (int **A; A[i][k]) - the base
+				// pointer of this access is not a GEP on a named array, so it is absent
+				// from arr_ptrs. Upstream only asserts (compiled out under NDEBUG ->
+				// null deref). Fail with a readable message instead of crashing.
+				if (arr_ptrs.find(ptr) == arr_ptrs.end() || arr_ptrs[ptr] == nullptr) {
+					report_fatal_error(llvm::Twine("morpher DFG pass: unsupported memory access through "
+						"a multi-level pointer (e.g. `int **A; A[i][k]`); the base pointer is not a "
+						"GEP on a named array. Flatten the array to 1-D or use `int *A`."), false);
+				}
 				Value *gep_ptr = arr_ptrs[ptr]->getPointerOperand();
 				assert(spm_base_allocation.find(gep_ptr) != spm_base_allocation.end());
 
@@ -11404,7 +11436,15 @@ void DFG::UpdateSPMAllocation(std::unordered_map<Value *, int> &spm_base_address
 			{
 				Value *ptr = STI->getPointerOperand();
 				LLVM_DEBUG(ptr->dump());
-				assert(arr_ptrs.find(ptr) != arr_ptrs.end());
+				// morpher-THU fix: multi-level pointer (int **A; A[i][k]) - the base
+				// pointer of this access is not a GEP on a named array, so it is absent
+				// from arr_ptrs. Upstream only asserts (compiled out under NDEBUG ->
+				// null deref). Fail with a readable message instead of crashing.
+				if (arr_ptrs.find(ptr) == arr_ptrs.end() || arr_ptrs[ptr] == nullptr) {
+					report_fatal_error(llvm::Twine("morpher DFG pass: unsupported memory access through "
+						"a multi-level pointer (e.g. `int **A; A[i][k]`); the base pointer is not a "
+						"GEP on a named array. Flatten the array to 1-D or use `int *A`."), false);
+				}
 				Value *gep_ptr = arr_ptrs[ptr]->getPointerOperand();
 				assert(spm_base_allocation.find(gep_ptr) != spm_base_allocation.end());
 

@@ -1,0 +1,30 @@
+Mapper arguments:
+xdim=4
+ydim=4
+json_arch=arch.json
+dfg=dfg.xml
+petype=HyCUBE_4REG
+ii=4
+mapping=0
+datapath_number=1
+max_iter=30
+hops=4
+noMutexPaths=false
+backtrack_limit=0
+max_II=32
+arch_name=
+lisa_training=false
+pins=
+pins_mode=1
+report=
+dfg_id=none
+
+MAP begin... 
+Initial target II = 4 (ResMin II = 2 , RecMin II = 4, UserGiven II = 4 )
+Current target II = 4, Iteration = 0
+noCongestion!
+noConflicts!
+Map Success with II = 4!!!
+
+Printing HyCUBE Binary...
+Elapsed time in seconds: 0 sec

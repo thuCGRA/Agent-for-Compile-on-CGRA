@@ -19,7 +19,7 @@ $ diff -rq src/mapper ~/morpher/Morpher_CGRA_Mapper -x applications -x json_arch
 文件 src/mapper/src/CMakeLists.txt 和 .../src/CMakeLists.txt 不同
 ```
 
-也就是说：**dfggen 与 simulator 与上游逐字节相同；mapper 只差一个 CMakeLists 里的两行。**
+也就是说：**simulator 与上游逐字节相同；dfggen 有 3 处空指针防御性改动（见下 §2.2）；mapper 只差一个 CMakeLists 里的两行。**
 
 ## 二、唯一的上游源码改动
 
@@ -39,6 +39,25 @@ $ diff -rq src/mapper ~/morpher/Morpher_CGRA_Mapper -x applications -x json_arch
 `build.sh` 的 `apply_patch()` 会打补丁并在 `src/mapper/.0001-*.applied` 留下标记文件，
 重复执行不会二次打补丁。
 
+## 二之二、dfggen 的三处本工程改动（装 polybench 时加的防御）
+
+`src/dfggen/src/common/dfg.cpp` 里有三处 **不改变受支持用例行为** 的空指针防御：
+上游假定每次访存的基址都是"命名数组上的 GEP"，遇到 `int **A; A[i][k]` 这种二级
+指针时 `gep_derivatives` / `mem_ptrs` / `arr_ptrs` 里查不到条目，而上游只写了
+`assert(...)`——`build.sh` 用 Release 编译 dfggen，`NDEBUG` 把 assert 编掉，于是变成
+空指针解引用、直接段错误。
+
+| 函数 | 上游写法 | 改成 |
+|---|---|---|
+| `DFG::getTransferVariables`（load / store 两处） | `assert(gep_derivatives.find(p) != end());` 后直接解引用 | 查不到就 `continue`，该节点不做基址记账 |
+| `DFG::SetBasePointers`（load / store 两处） | `assert(mem_ptrs.find(p) != end());` 后直接解引用 | 改成 `else if` 判存在，否则不设基址 |
+| `DFG::UpdateSPMAllocation`（load / store 两处） | `assert(arr_ptrs.find(p) != end());` 后直接解引用 | 改成 `report_fatal_error`，给出可读的"不支持二级指针"提示 |
+
+效果：22 个只用具名数组的 testcase 行为不变（已逐一实测，见 README）；26 个 polybench
+用例从 **段错误** 变成 **`LLVM ERROR: morpher DFG pass: unsupported memory access
+through a multi-level pointer ...`**。**这只是把崩溃变成可读报错，不是让 polybench 能编**
+——静态 SPM 地址模型表达不了动态二级指针，要跑 polybench 得先把数组展平成一维。
+
 ## 三、删掉了什么（只删不加，避免混淆上游内容）
 
 | 上游路径 | 体积 | 为什么删 |
@@ -47,7 +66,7 @@ $ diff -rq src/mapper ~/morpher/Morpher_CGRA_Mapper -x applications -x json_arch
 | `Morpher_CGRA_Mapper/json_arch/` | 576 KB | 20+ 个架构描述变体；本工程只用 HyCUBE 4x4，放 `arch/` |
 | `hycube_simulator/yash-aes/` | 61 MB | AES 演示工程 |
 | `hycube_simulator/pedometer*` | — | 演示工程 |
-| `Morpher_DFG_Generator/benchmarks/` | 3.2 MB | 上游 20+ 个 benchmark；本工程只留 3 个，放 `kernels/` |
+| `Morpher_DFG_Generator/benchmarks/` | 3.2 MB | 上游 20+ 个 benchmark 目录树；按内容去重后的 48 个 `.c` 拷到 `kernels/`，清单见 `scripts/benchmarks.tsv` |
 | `Morpher_DFG_Generator/run_pass.sh` | — | 调用 `libSkeletonPass.so` 的旧脚本，上游自己也已不用 |
 
 **重点**：`src/` 里**没有** `LLMMapper`、`QuickMapper`、`DFGPartPredLight`。
@@ -72,7 +91,7 @@ grep -rn "mapping_method == 3\|--morpher_light" src/mapper/src/  # 空
 |---|---|
 | `scripts/{lib,build,gen_dfg,inject_mem,gen_trace,map,sim,run_all}.sh` | 整条流水线。上游只有一个大而耦合的 `run_morpher.py`（`os.chdir` + 固定 benchmarks 路径 + 全局 `MORPHER_HOME`），无法并行、无法单步调试 |
 | `scripts/kernels.tsv` | kernel → 函数名映射（`mac` 的函数名是 `main`）|
-| `kernels/{array_add,mac,trmm}/*.c` | 与上游 benchmarks 逐字节相同，只是搬了位置 |
+| `kernels/<k>/<k>.c`（48 个） | 与上游 benchmarks 逐字节相同，只是搬了位置；`scripts/install_benchmarks.sh` 可按清单重拷 |
 | `arch/hycube_4x4.json` | = 上游 `json_arch/hycube_original.json` |
 | `arch/hycube_4x4_updatemem.json` | = 上游 `json_arch/hycube_original_updatemem.json`（`update_mem_alloc.py` 的输入）|
 | `toolchain/include32/gnu/stubs-32.h` | 空壳头，让 `-target i386` 能找到 `gnu/stubs-32.h`；见 `docs/02-dfg.md` |
