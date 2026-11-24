@@ -8,3 +8,5 @@ sim_result.txt
 result.txt
 arch_verbose.json
 mem_verbose.json
+*.rej
+*.orig
