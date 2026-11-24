@@ -704,6 +704,27 @@ bool CGRAXMLCompile::PathFinderMapper::estimateRouting(DFGNode *node,
 		}
 	}
 
+	// M1: 约束过滤。位置必须在候选集生成之后、getLatCandDests 之前，
+	// 否则后面按 minLat 做的裁剪会作用在未过滤的集合上。
+	if (constraints.enabled && !candidateDests.empty())
+	{
+		std::vector<DataPath *> kept;
+		kept.reserve(candidateDests.size());
+		for (DataPath *dp : candidateDests)
+		{
+			int px = dp->getPE()->getPosition_X();
+			int py = dp->getPE()->getPosition_Y();
+			if (constraints.allowed(node->idx, px, py))
+				kept.push_back(dp);
+		}
+		if (kept.size() != candidateDests.size())
+		{
+			LOG(ROUTE) << "constraints: node " << node->idx << " candidates "
+			           << candidateDests.size() << " -> " << kept.size() << "\n";
+		}
+		candidateDests.swap(kept);
+	}
+
 	LOG(ROUTE)<< "Candidate Dests = " << candidateDests.size() << "\n";
 	if (candidateDests.empty())
 		return false;

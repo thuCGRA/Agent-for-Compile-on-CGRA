@@ -121,8 +121,15 @@ bool CGRAXMLCompile::SAMapper::SAMap(CGRA *cgra, DFG *dfg)
 	if (unmapped_node_numer == 0 && overuse_number == 0)
 	{
 		LOG(SA_) << "find a valid initial mapping, exit....II =" << this->cgra->get_t_max() << "\n";
-		return true;
+		if (!forceAnneal)
+		{
+			dumpSAMapping();
+			return true;
+		}
+		LOG(SA_) << "forceAnneal: warm start is valid but annealing anyway\n";
 	}
+	// 热启动本身就可能可行，先记下来；即使后面退火把解弄坏，也有东西可回滚。
+	considerBest();
 
 
 	//start Simulated Annealing mapping
@@ -132,7 +139,7 @@ bool CGRAXMLCompile::SAMapper::SAMap(CGRA *cgra, DFG *dfg)
 
 	LOG(SA_)<<"###############current mapping: \n"<<dumpMappingToStr();
 
-	while (curr_temp > minimim_temp)
+	while (curr_temp > minimim_temp && !budgetExhausted)
 	{
 		LOG(SA_) << "*******************************current temperature:" << curr_temp << "\n";
 		float accept_rate = inner_map();
@@ -153,14 +160,112 @@ bool CGRAXMLCompile::SAMapper::SAMap(CGRA *cgra, DFG *dfg)
 
 		curr_temp = updateTemperature(curr_temp, accept_rate);
 
-		if (isCurrMappingValid())
+		// 第三处早退：可行即跳出温度循环。--sa_optimize 必须关掉它，
+		// 否则退火只跑完"变可行"的那一个温度，等于没退火。
+		if (!optimizeAfterFeasible && isCurrMappingValid())
 		{
 			LOG(SA_) << "find a valid mapping, exit...II =" << this->cgra->get_t_max() << "\n";
 			break;
 		}
 	}
 
-	return isCurrMappingValid();
+	bool ok = false;
+	if (haveBest)
+	{
+		restoreBestSnapshot();
+		LOG(SA_) << "restore best snapshot, cost=" << bestCost << "\n";
+		ok = isCurrMappingValid();
+	}
+	else
+	{
+		ok = isCurrMappingValid();
+	}
+	if (ok)
+	{
+		dumpSAMapping();
+	}
+	else
+	{
+		mappingLog << "Map Failed!.\n";
+		mappingLog.close();
+		mappingLog2.close();
+		mappingLog4.close();
+	}
+	return ok;
+}
+
+// 上游 SA 从不写放置产物：printMappingLog/printMappingLog2 只在
+// HeuristicMapper::Map() 的成功路径调用，而 SA 走的是 SAMap()。
+// 这里补上同样的收尾，另外写 mappingwithlatency.txt（第 4 列是绝对时刻，
+// routeInfo.log 里的 -T 只是相位，两者 %II 后等价）。
+// 只在可行时记录快照，且只保留代价最小的那个。
+// getCost() = unmapped*100 + congestion*10 + conflict*10 + port_usage
+void CGRAXMLCompile::SAMapper::considerBest()
+{
+	if (!isCurrMappingValid())
+	{
+		return;
+	}
+	int c = getCost();
+	if (haveBest && c >= bestCost)
+	{
+		return;
+	}
+	bestCost = c;
+	best_placement = dfg_node_placement;
+	best_routing = data_routing_path;
+	haveBest = true;
+	LOG(SA_) << "new best cost=" << bestCost << " at move " << movesDone << "\n";
+}
+
+bool CGRAXMLCompile::SAMapper::restoreBestSnapshot()
+{
+	if (!haveBest)
+	{
+		return false;
+	}
+	for (DFGNode *node : sortedNodeList)
+	{
+		clearNodeMapping(node);
+	}
+	// 先全部放置，再全部布线：assignPath 需要两端 rootDP 都已就位。
+	for (DFGNode *node : sortedNodeList)
+	{
+		auto it = best_placement.find(node);
+		if (it == best_placement.end())
+		{
+			continue;
+		}
+		it->second.first->assignNode(node, it->second.second, this->dfg);
+		node->rootDP = it->second.first;
+	}
+	for (auto &kv : best_routing)
+	{
+		assignPath(kv.first.first, kv.first.second, kv.second);
+	}
+	dfg_node_placement = best_placement;
+	data_routing_path = best_routing;
+	return true;
+}
+
+void CGRAXMLCompile::SAMapper::dumpSAMapping()
+{
+	mappingLog << "Map Success!.\n";
+	mappingLog2 << "Map Success!.\n";
+	this->printMappingLog();
+	this->printMappingLog2();
+	for (DFGNode *node : sortedNodeList)
+	{
+		if (node->rootDP == NULL)
+		{
+			continue;
+		}
+		mappingLog4 << node->idx << "," << node->rootDP->getPE()->X << ","
+					<< node->rootDP->getPE()->Y << "," << node->rootDP->getLat() << "\n";
+	}
+	mappingLog.close();
+	mappingLog2.close();
+	mappingLog4.close();
 }
 
 bool CGRAXMLCompile::SAMapper::initMap()
@@ -270,6 +375,12 @@ float CGRAXMLCompile::SAMapper::inner_map()
 
 	for (int i = 0; i < movement_in_each_temp; i++)
 	{
+		if (moveBudget > 0 && movesDone >= moveBudget)
+		{
+			budgetExhausted = true;
+			break;
+		}
+		movesDone++;
 		std::stringstream congestion_detail;
 		LOG(SA) << "************ NO." << i << " movement, unmapped nodes:" << getNumberOfUnmappedNodes() << ", congestion:" << getCongestionNumber(congestion_detail) 
 			<< ", congestion:" << getConflictNumber(congestion_detail);
@@ -303,7 +414,28 @@ float CGRAXMLCompile::SAMapper::inner_map()
 			LOG(SA)<<"this DFG node is not placed yet" ;
 		}
 		
-		auto dp_candidate = getRandomDPCandidate(selected_dfg_node).front();
+		// M1: 约束（--constraints）过滤之后候选表可能为空。上游在这里直接 .front()，
+		// 空表就是未定义行为——实测 SIGSEGV，gdb 栈：inner_map:417 -> SAMap:145 -> main:179。
+		// 空表只说明"这个节点此刻没有合法位置"，那是一次失败的移动，不是崩溃的理由：
+		// 回滚已清掉的节点、恢复快照、继续下一次移动。
+		std::vector<DataPath *> dp_candidates = getRandomDPCandidate(selected_dfg_node);
+		if (dp_candidates.empty())
+		{
+			LOG(SA) << "no legal candidate for node " << selected_dfg_node->idx
+			        << " (constraints filtered everything), skip this move\n";
+			moved_nodes.push_back(selected_dfg_node);
+			for (auto node : moved_nodes)
+			{
+				clearNodeMapping(node);
+				restoreMapping(node, old_dfg_node_placement, old_data_routing_path);
+			}
+			dfg_node_placement.clear();
+			dfg_node_placement.insert(old_dfg_node_placement.begin(), old_dfg_node_placement.end());
+			data_routing_path.clear();
+			data_routing_path.insert(old_data_routing_path.begin(), old_data_routing_path.end());
+			continue;
+		}
+		auto dp_candidate = dp_candidates.front();
 		LOG(SA) << "map this DFG node:" << selected_dfg_node->idx << " op:" << selected_dfg_node->op << "to pe:" << dp_candidate->getPE()->getName() ;
 		bool route_succ = SARoute(selected_dfg_node, dp_candidate);
 		moved_nodes.push_back(selected_dfg_node);
@@ -327,7 +459,14 @@ float CGRAXMLCompile::SAMapper::inner_map()
 			{
 				moved_nodes.push_back(parent);
 				clearNodeMapping(parent);
-				auto dp_candidate = getRandomDPCandidate(parent).front();
+				std::vector<DataPath *> parent_candidates = getRandomDPCandidate(parent);
+				if (parent_candidates.empty())
+				{
+					// 同样的空表保护（这段当前是死代码，但保留正确的写法）
+					route_succ = false;
+					break;
+				}
+				auto dp_candidate = parent_candidates.front();
 				LOG(SA) << "route other parent node = " << parent->idx << " op:" << parent->op << " current_pe:" << dp_candidate->getPE()->getName() << "\n";
 				if (!SARoute(parent, dp_candidate))
 				{
@@ -382,8 +521,8 @@ float CGRAXMLCompile::SAMapper::inner_map()
 			old_dfg_node_placement.clear();
 			old_data_routing_path.clear();
 
-			// printHyCUBEBinary(this->cgra);
-			if (isCurrMappingValid())
+			considerBest();
+			if (!optimizeAfterFeasible && isCurrMappingValid())
 			{
 				std::cout << "find a valid mapping, exit inner_map....\n";
 				return (float(accepted_number)) / movement_in_each_temp;
@@ -408,12 +547,91 @@ float CGRAXMLCompile::SAMapper::inner_map()
 	return (float(accepted_number)) / movement_in_each_temp;
 }
 
+int CGRAXMLCompile::SAMapper::nodeBlame(DFGNode *node)
+{
+	int blame = 0;
+
+	// 1) 时分复用下的槽位压力：这个节点所在 PE 上还挤了几个别的节点
+	auto it = dfg_node_placement.find(node);
+	if (it != dfg_node_placement.end() && it->second.first != NULL)
+	{
+		PE *myPE = it->second.first->getPE();
+		int same = 0;
+		for (auto &kv : dfg_node_placement)
+			if (kv.first != node && kv.second.first != NULL && kv.second.first->getPE() == myPE)
+				same++;
+		blame += 3 * same;
+	}
+
+	// 2) 绕行：与它相连、已经布线的边上多走了几跳（1 跳是相邻，多出来的算绕）
+	for (auto &kv : data_routing_path)
+	{
+		if (kv.first.first != node && kv.first.second != node)
+			continue;
+		int hops = (int)kv.second.size();
+		if (hops > 1)
+			blame += hops - 1;
+	}
+
+	return blame;
+}
+
+int CGRAXMLCompile::SAMapper::candidateScore(DataPath *dp, DFGNode *node)
+{
+	PE *pe = dp->getPE();
+	if (pe == NULL)
+		return 1 << 20;
+
+	int dist = 0;
+	auto addNeighbour = [&](DFGNode *other) {
+		auto it = dfg_node_placement.find(other);
+		if (it == dfg_node_placement.end() || it->second.first == NULL)
+			return; // 邻居还没放，这一项不参与
+		PE *o = it->second.first->getPE();
+		dist += std::abs(pe->getPosition_X() - o->getPosition_X())
+		      + std::abs(pe->getPosition_Y() - o->getPosition_Y());
+	};
+	for (DFGNode *p : node->parents)
+		addNeighbour(p);
+	for (DFGNode *c : node->children)
+		addNeighbour(c);
+
+	int occ = 0;
+	for (auto &kv : dfg_node_placement)
+		if (kv.second.first != NULL && kv.second.first->getPE() == pe)
+			occ++;
+
+	return 2 * dist + occ;
+}
+
 CGRAXMLCompile::DFGNode *CGRAXMLCompile::SAMapper::selectDFGNodeToUnmap()
 {
 
-	std::random_device r;
-	std::default_random_engine e1(r());
+	// M1.5: 用成员 rng（可 --sa_seed），不再每次调用都重新播种真随机源
+	std::mt19937 &e1 = rng;
 	std::uniform_int_distribution<int> uniform_dist(0, sortedNodeList.size() - 1);
+
+	if (selectStrategy == 1 && !sortedNodeList.empty())
+	{
+		// 按 blame 从大到小取前 K 名，再在其中随机选一个。
+		// 保留随机性是故意的：SA 需要能走"看起来不划算"的移动，
+		// 否则邻域退化成贪心，温度这个参数就没意义了。
+		const int K = 4;
+		std::vector<std::pair<int, DFGNode *>> ranked;
+		ranked.reserve(sortedNodeList.size());
+		for (DFGNode *n : sortedNodeList)
+			ranked.push_back(std::make_pair(nodeBlame(n), n));
+		std::stable_sort(ranked.begin(), ranked.end(),
+			[](const std::pair<int, DFGNode *> &a, const std::pair<int, DFGNode *> &b) {
+				return a.first > b.first;
+			});
+		int k = (int)ranked.size() < K ? (int)ranked.size() : K;
+		std::uniform_int_distribution<int> pick(0, k - 1);
+		DFGNode *chosen = ranked[pick(rng)].second;
+		LOG(SA) << "selectStrategy=1: top blame=" << ranked[0].first << " pick node " << chosen->idx << "\n";
+		return chosen;
+	}
+
 	return sortedNodeList[std::abs(std::round(uniform_dist(e1)))];
 
 	// select random node;
@@ -455,8 +673,7 @@ CGRAXMLCompile::DFGNode *CGRAXMLCompile::SAMapper::selectAParentForDFGNode(DFGNo
 		}
 	}
 	assert(candidates.size() > 0);
-	std::random_device r;
-	std::default_random_engine e1(r());
+	std::mt19937 &e1 = rng;
 	std::uniform_int_distribution<int> uniform_dist(0, candidates.size() - 1);
 	return candidates[std::abs(std::round(uniform_dist(e1)))];
 }
@@ -582,14 +799,36 @@ int CGRAXMLCompile::SAMapper::getPortUsage()
 	return usage_number;
 }
 
+// total hop count over all currently routed edges.
+// Each entry of data_routing_path is the A*-found path for one DFG edge;
+// consecutive LatPort elements are the PE hops it takes.
+int CGRAXMLCompile::SAMapper::getWireLength()
+{
+	int wire = 0;
+	for (auto &kv : data_routing_path)
+	{
+		const std::vector<LatPort> &path = kv.second;
+		if (path.size() > 1)
+			wire += (int)path.size() - 1;
+	}
+	return wire;
+}
+
 int CGRAXMLCompile::SAMapper::getCost()
 {
 	int unmapped_node_number = getNumberOfUnmappedNodes();
 	int port_usage = getPortUsage();
 	int congestion_number = getCongestionNumber();
 	int conflict_number = getConflictNumber();
-	int total_cost = unmapped_node_number * 100 + congestion_number * 10 + conflict_number * 10 + port_usage;
-	LOG(COST) << "unmapped node:" << unmapped_node_number << " port usage:" << port_usage << " congestion:" << congestion_number << " total cost:" << total_cost << "\n";
+	// costMode 1: replace port_usage with wire length.
+	// The upstream cost has no delay/detour term at all, so once the warm start
+	// is feasible there is nothing left to minimise and the annealer spins.
+	int wire = getWireLength();
+	int shaping = (costMode == 1) ? wire : port_usage;
+	int total_cost = unmapped_node_number * 100 + congestion_number * 10 + conflict_number * 10 + shaping;
+	LOG(COST) << "unmapped node:" << unmapped_node_number << " port usage:" << port_usage
+	          << " wire:" << wire << " congestion:" << congestion_number
+	          << " total cost:" << total_cost << "\n";
 	return total_cost;
 }
 
@@ -848,6 +1087,13 @@ std::vector<CGRAXMLCompile::DataPath *> CGRAXMLCompile::SAMapper::getRandomDPCan
 
 								if (node->blacklistDest.find(dp) == node->blacklistDest.end())
 								{
+									// M1: 退火阶段也必须遵守约束。initMap 走的是
+									// PathFinderMapper::estimateRouting（那里已过滤），
+									// 但邻域算子走这里，漏掉就等于约束只在热启动时有效。
+									if (!constraints.allowed(node->idx,
+									                         dp->getPE()->getPosition_X(),
+									                         dp->getPE()->getPosition_Y()))
+										continue;
 									candidateDests.push_back(dp);
 									dpPenaltyMap[dp] = penalty;
 								}
@@ -884,6 +1130,13 @@ std::vector<CGRAXMLCompile::DataPath *> CGRAXMLCompile::SAMapper::getRandomDPCan
 
 								if (node->blacklistDest.find(dp) == node->blacklistDest.end())
 								{
+									// M1: 退火阶段也必须遵守约束。initMap 走的是
+									// PathFinderMapper::estimateRouting（那里已过滤），
+									// 但邻域算子走这里，漏掉就等于约束只在热启动时有效。
+									if (!constraints.allowed(node->idx,
+									                         dp->getPE()->getPosition_X(),
+									                         dp->getPE()->getPosition_Y()))
+										continue;
 									candidateDests.push_back(dp);
 									dpPenaltyMap[dp] = penalty;
 								}
@@ -895,9 +1148,38 @@ std::vector<CGRAXMLCompile::DataPath *> CGRAXMLCompile::SAMapper::getRandomDPCan
 		}
 	}
 
-	unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
-
-	shuffle(candidateDests.begin(), candidateDests.end(), std::default_random_engine(seed));
+	if (pickStrategy == 1 && !candidateDests.empty())
+	{
+		// 上游是"洗牌后由调用方取 .front()"——等价于随机挑一个候选。
+		// 这里改成按 candidateScore 升序；同分之间再打散，
+		// 否则永远取同一个方向的 PE，等于把随机性彻底去掉。
+		std::vector<std::pair<int, DataPath *>> scored;
+		scored.reserve(candidateDests.size());
+		for (DataPath *dp : candidateDests)
+			scored.push_back(std::make_pair(candidateScore(dp, node), dp));
+		std::stable_sort(scored.begin(), scored.end(),
+			[](const std::pair<int, DataPath *> &a, const std::pair<int, DataPath *> &b) {
+				return a.first < b.first;
+			});
+		for (size_t i = 0; i < scored.size();)
+		{
+			size_t j = i;
+			while (j + 1 < scored.size() && scored[j + 1].first == scored[i].first)
+				j++;
+			std::shuffle(scored.begin() + i, scored.begin() + j + 1, rng);
+			i = j + 1;
+		}
+		candidateDests.clear();
+		for (auto &p : scored)
+			candidateDests.push_back(p.second);
+		LOG(SA) << "pickStrategy=1: best candidate score=" << scored.front().first
+		        << " for node " << node->idx << "\n";
+	}
+	else
+	{
+		// M1.5: 候选表洗牌也走 rng（上游用 system_clock 当种子，无法复现）
+		shuffle(candidateDests.begin(), candidateDests.end(), rng);
+	}
 
 	return candidateDests;
 }

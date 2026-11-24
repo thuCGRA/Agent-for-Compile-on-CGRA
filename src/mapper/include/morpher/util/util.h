@@ -43,6 +43,19 @@ struct arguments
 	int max_hops = 4;  // for HyCUBE
 	int mapping_method = 0; // 0: PathFinderMapper, 1: SAMapper (SimulatedAnnealing),  HeuristicMapper will not be used
 	int max_II = 32;
+	// acc-thu: SA 只要热启动合法就直接 return，退火从不运行。置 true 强制退火。
+	bool sa_force_anneal = false;
+	int sa_seed = 20136;   // M1.5: SA 的 RNG 种子，同种子必须得到同一映射
+	// 上游 SA 把 isCurrMappingValid() 同时当停止条件和接受条件：一旦可行就立刻
+	// 返回，所以它只是个可行性搜索器，从不优化。置 true 让它在可行之后继续退火，
+	// 最后回滚到代价最小的那个可行快照。
+	bool sa_optimize = false;
+	int sa_select = 0;   // M1.5: 0=上游随机 1=按 blame 挑节点
+	int sa_pick = 0;     // M1.5: 0=上游洗牌取首个 1=按距离排序
+	int sa_cost_mode = 0; // 0: upstream (port_usage)  1: wire length
+	int sa_budget = 0;
+	// M1: 约束文件（JSON），空表示无约束
+	std::string constraints_file; // 移动次数上限，0 = 不限（上游行为）
 	std::string arch_name = "";
 	lisa_arguments lisa_arg;
 };
@@ -137,6 +150,14 @@ inline arguments parse_arguments(int argn, char *argc[]){
 		.add_option<bool>("-e", "--noMutexPaths", "noMutexPaths", false)
 		.add_option<int>("-b", "--backtrack_limit", "back track limit", 0)
 		.add_option<int>("", "--max_II", "max II", 32)
+		.add_option<int>("", "--sa_seed", "RNG seed for SA (same seed => same mapping)", 20136)
+					.add_option<bool>("", "--sa_force_anneal", "SA: anneal even if the PathFinder warm start is already valid", false)
+		.add_option<bool>("", "--sa_optimize", "SA: keep annealing after feasibility and return the cheapest valid snapshot", false)
+		.add_option<int>("", "--sa_select", "SA: node selection 0=random(upstream) 1=blame-ranked", 0)
+		.add_option<int>("", "--sa_pick", "SA: candidate pick 0=shuffle(upstream) 1=distance-ranked", 0)
+		.add_option<int>("", "--sa_cost_mode", "cost function: 0=upstream(port_usage), 1=total wire length", 0)
+		.add_option<int>("", "--sa_budget", "SA: max number of moves (0 = unlimited)", 0)
+		.add_option<std::string>("", "--constraints", "JSON file with pins/forbidden (M1)", "")
 		.add_option<std::string>("", "--arch_name", "architecture name", "")
 		.add_option<bool>("", "--lisa_training", "lisa training", false)
 		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
@@ -155,6 +176,14 @@ inline arguments parse_arguments(int argn, char *argc[]){
 	ret.max_hops =  args.get_option<int>("--hops");
 	ret.mapping_method = args.get_option<int>("--mapping");
 	ret.max_II = args.get_option<int>("--max_II");
+	ret.sa_force_anneal = args.get_option<bool>("--sa_force_anneal");
+	ret.sa_seed = args.get_option<int>("--sa_seed");
+	ret.sa_optimize = args.get_option<bool>("--sa_optimize");
+	ret.sa_select = args.get_option<int>("--sa_select");
+	ret.sa_pick = args.get_option<int>("--sa_pick");
+	ret.sa_cost_mode = args.get_option<int>("--sa_cost_mode");
+	ret.sa_budget = args.get_option<int>("--sa_budget");
+	ret.constraints_file = args.get_option<std::string>("--constraints");
 	ret.use_json = true;
 	ret.arch_name = args.get_option<std::string>("--arch_name");
 	lisa_arg.arch_name = args.get_option<std::string>("--arch_name");

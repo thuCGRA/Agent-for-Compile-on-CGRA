@@ -23,6 +23,21 @@ W="$(kdir "$k")"
 
 T="$W/trace_build"; rm -rf "$T"; mkdir -p "$T"; cd "$T"
 cp "$W/kernel.c" .
+# 有些 benchmark 运行时还要读外部数据：microspeech 要 param_conv.txt /
+# param_fc.txt（同目录）以及源码里写死的 ../microspeech_test_data/。
+# 把 kernels/<k>/ 下除 .c 以外的东西都拷进来，测试数据目录链到 $W 下，
+# 这样二进制在 $T 里跑时 "../microspeech_test_data/" 正好指向 $W 里那份。
+shopt -s nullglob
+aux=("$KERNELS/$k"/*)
+shopt -u nullglob
+for a in "${aux[@]}"; do
+  [ -f "$a" ] || continue
+  case "$a" in *.c) continue ;; esac
+  cp "$a" "$T/"
+done
+if [ -d "$KERNELS/microspeech_test_data" ]; then
+  ln -sfn "$KERNELS/microspeech_test_data" "$W/microspeech_test_data"
+fi
 
 banner "[$k] 1/4 native C -> IR（trace 与字宽无关，故不用 i386 目标）"
 clang -D CGRA_COMPILER -Wno-implicit-function-declaration -Wno-format \

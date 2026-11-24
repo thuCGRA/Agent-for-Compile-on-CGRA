@@ -88,6 +88,13 @@ int main(int argn, char *argc[])
 		mapper = new PathFinderMapper(inputDFG_filename);
 	}else if(mapping_method  == 1){
 		mapper = new SAMapper(inputDFG_filename);
+		static_cast<SAMapper *>(mapper)->seedRng((unsigned)args.sa_seed);
+				static_cast<SAMapper *>(mapper)->forceAnneal = args.sa_force_anneal;
+		static_cast<SAMapper *>(mapper)->optimizeAfterFeasible = args.sa_optimize;
+		static_cast<SAMapper *>(mapper)->selectStrategy = args.sa_select;
+		static_cast<SAMapper *>(mapper)->pickStrategy = args.sa_pick;
+		static_cast<SAMapper *>(mapper)->costMode = args.sa_cost_mode;
+		static_cast<SAMapper *>(mapper)->moveBudget = args.sa_budget;
 		
 		// assert(false && "convert to SA");
 	}else if(mapping_method  == 2){
@@ -97,6 +104,18 @@ int main(int argn, char *argc[])
 	}
 
 	
+	// M1: 约束在 mapper 建好之后、任何映射开始之前装载；装不上就退出，
+	// 不能带着半套约束跑（那会产出看起来成功但违反约束的映射）。
+	if (!args.constraints_file.empty())
+	{
+		if (!mapper->constraints.loadFromFile(args.constraints_file))
+		{
+			std::cerr << "FATAL: failed to load constraints from " << args.constraints_file << "\n";
+			return 1;
+		}
+		std::cout << mapper->constraints.describe() << "\n";
+	}
+
 	mapper->setMaxIter(args.maxiter);
 	std::cout << "MAP begin... \n";
 	int resII = mapper->getMinimumII(testCGRA, &currDFG);

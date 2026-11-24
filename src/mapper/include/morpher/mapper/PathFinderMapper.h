@@ -5,6 +5,7 @@
  *      Author: manupa
  */
 
+#include <morpher/mapper/Constraints.h>
 #include <morpher/mapper/HeuristicMapper.h>
 #include <morpher/util/debug.h>
 #include <string>
@@ -64,6 +65,9 @@ struct InsFormat{
 class PathFinderMapper : public HeuristicMapper
 {
 public:
+	// M1: pins / forbidden。SA 继承自本类，因此两个后端共用同一套语义。
+	Constraints constraints;
+
 	PathFinderMapper(std::string fName) : HeuristicMapper(fName){
 		mapping_method_name  = "PathFinder";
 										  };
