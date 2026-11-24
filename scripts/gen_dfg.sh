@@ -44,7 +44,9 @@ opt -load "$OUT/libdfggenPass.so" -fn "$f" \
 
 cp "${f}_PartPredDFG.xml" dfg.xml
 cp "${f}_mem_alloc.txt"   mem_alloc.txt
-ln -sfn "${f}_opt_instrument.ll" kernel_opt_instrument.ll
+# f == "kernel" 时（opencgra 的 fir）目标就是它自己，ln 会报
+# "为同一文件"。这种情况不用建链接。
+[ "$f" = "kernel" ] || ln -sfn "${f}_opt_instrument.ll" kernel_opt_instrument.ll
 echo
 echo "节点数: $(grep -c '<Node ' dfg.xml)   边(Inputs 内 Input 项): $(grep -o '<Input idx' dfg.xml | wc -l)"
 echo "产物: $W/dfg.xml  $W/mem_alloc.txt  $(ls *.dot 2>/dev/null || true)"

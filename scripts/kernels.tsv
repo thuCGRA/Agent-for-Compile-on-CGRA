@@ -1,5 +1,51 @@
 # kernel<TAB>进入 DFG 的函数名
-# 注意：mac.c 的循环在 main() 里（没有独立函数），所以 -fn main
+# 由 scripts/install_benchmarks.sh 从 scripts/benchmarks.tsv 生成，别手改
+# 注意：cgrame/polybench 那批的循环在 main() 里（没有独立函数），所以 -fn main
 array_add	array_add
-mac	main
+array_cond	array_cond
+hpcg	hpcg
 trmm	trmm
+mac	main
+mac2	main
+sum	main
+conv2	main
+conv3	main
+mults1	main
+mults2	main
+fir	kernel
+gemm	gemm
+conv2d_2x2	convolution2d
+conv2d_3x3	convolution2d
+gemm_w1	gemm
+gemm_w2	gemm
+gemm_w3	gemm
+microspeech_1	microspeech_conv_layer_hycube
+microspeech_2	microspeech_conv_layer_hycube
+microspeech_3	microspeech_conv_layer_hycube
+microspeech_4	microspeech_conv_layer_hycube
+pb_2mm	main
+pb_2mm_u	main
+pb_atax	main
+pb_atax_u	main
+pb_bicg	main
+pb_bicg_u	main
+pb_cholesky	main
+pb_cholesky_u	main
+pb_doitgen	main
+pb_doitgen_u	main
+pb_gemm	main
+pb_gemm_u	main
+pb_gemver	main
+pb_gemver_u	main
+pb_gesummv	main
+pb_gesummv_u	main
+pb_mvt	main
+pb_mvt_u	main
+pb_symm	main
+pb_symm_u	main
+pb_syr2k	main
+pb_syr2k_u	main
+pb_syrk	main
+pb_syrk_u	main
+pb_trmm	main
+pb_trmm_u	main
