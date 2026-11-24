@@ -28,6 +28,38 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 FAMOU = os.path.join(os.path.expanduser("~"), "famou-v2")
 
+# famou-v2 要 Python >= 3.12，而且它的 api_server/report.py 在模块级 import
+# openai。系统 python3 是 3.8、没有 openai，直接跑会 ModuleNotFoundError。
+# 所以这里检测到解释器不对就换成 conda 的 famou 环境重跑一次 —— 这样
+# `python evo/report.py` 不管是谁的 python 都能用。
+_REEXEC_FLAG = "_EVO_REPORT_REEXEC"
+
+
+def _bootstrap_interpreter():
+    if os.environ.get(_REEXEC_FLAG):
+        return                                   # 已经换过一次，别再换
+    if sys.version_info >= (3, 12):
+        try:
+            import openai                        # noqa: F401
+            return
+        except ImportError:
+            pass
+    cand = os.environ.get("FAMOU_PY") or os.path.join(
+        os.path.expanduser("~"), "miniconda3", "envs", "famou", "bin", "python")
+    if os.path.isfile(cand) and os.path.realpath(cand) != os.path.realpath(sys.executable):
+        os.environ[_REEXEC_FLAG] = "1"
+        os.execv(cand, [cand, os.path.abspath(__file__)] + sys.argv[1:])
+    sys.exit(
+        "需要 Python >= 3.12 且装了 openai（famou-v2 的依赖）。\n"
+        "没找到 %s。\n"
+        "请用 conda 环境跑：\n"
+        "    bash evo/report.sh          # 自动用 ~/miniconda3/envs/famou/bin/python\n"
+        "或指定解释器：\n"
+        "    ~/miniconda3/envs/famou/bin/python evo/report.py\n" % cand)
+
+
+_bootstrap_interpreter()
+
 
 def credentials():
     """Read the same endpoint the run.sh uses, so both agree."""

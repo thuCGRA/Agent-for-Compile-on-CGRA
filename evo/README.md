@@ -261,10 +261,22 @@ mapper 的相位搜索会爆炸——mac 就是这么超时的（实测单次 16
 加上一段由 LLM 写的“这次搜索到底怎么走的”叙事（`evolution_map`）。
 
 ```bash
-python evo/report.py                       # 最新一个实验
-python evo/report.py --exp famou_data/<exp>
-python evo/report.py --out out/report      # 默认就是这个
+bash evo/report.sh                         # 最新一个实验（推荐）
+bash evo/report.sh --exp famou_data/<exp>
+bash evo/report.sh --out out/report        # 默认就是这个
+
+python evo/report.py                       # 也行：检测到解释器不对会自动切到 famou 环境
 ```
+
+**解释器要注意**：`report.py` 要 `famou-v2/api_server/report.py`，后者在模块顶部
+`from openai import ...`，而系统 `python3` 是 3.8 且没装 openai，直接跑会
+`ModuleNotFoundError: No module named 'openai'`。两个包起来：
+
+* `evo/report.sh` 直接用 `~/miniconda3/envs/famou/bin/python`（不走 `conda activate`，
+  因为非交互 ssh 下 conda 不在 PATH）；
+* `report.py` 自带一段 bootstrap：发现 `sys.version_info < (3,12)` 或导不了 `openai`
+  就 `os.execv` 到 famou 环境的 python 重跑一次（用 `_EVO_REPORT_REEXEC` 防止无限循环）。
+  所以 `python evo/report.py` 也能跑。
 
 产出 `out/report/data.json`（聚合数据）与 `out/report/report.html`（自包含，无需服务器）。
 报告里的叙事是真调用 LLM 生成的，所以跑一次要一分钟左右。
