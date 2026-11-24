@@ -35,7 +35,19 @@ class MapperError(RuntimeError):
 
 
 def acc_thu_root():
-    return os.environ.get("ACC_THU_ROOT") or os.path.expanduser("~/acc-thu")
+    """本工程自己的构建产物优先。
+
+    两个副本（acc-thu / acc-thu-agent）各自 build 自己的 mapper：patch 不同，
+    二进制也不同。拿 ~/acc-thu 的旧二进制去跑 `--sa_optimize`，会得到
+    `(parse error) unrecognized option--sa_seed` 然后秒退——这个坑踩过一次。
+    """
+    env = os.environ.get("ACC_THU_ROOT")
+    if env:
+        return env
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.exists(os.path.join(here, "out", "cgra_xml_mapper")):
+        return here
+    return os.path.expanduser("~/acc-thu")
 
 
 def mapper_binary(root=None):
