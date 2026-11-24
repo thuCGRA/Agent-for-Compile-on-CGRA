@@ -199,3 +199,112 @@ bypass 多出来的自由度正是 HyCUBE 那条组合路径。
 CGRA-ME v2.0.1 的 ILP 实现（`src/core/ILPMapper.cpp`，13 组约束、`computeIIS()` 求最小不可行子系统）
 **只读思路，未拷代码** —— 它是"仅限非商业非营利"许可，而本工程是 MIT。
 CP-SAT 建模是本工程自己写的。
+
+---
+
+## 8. 真布线层：`tools/ilp/ilp_router.py`
+
+`ilp_mapper.py` 只回答"每个节点放在哪个 PE、哪个相位"，对每条边只记一个跳数 `h`
+和一个路由周期数 `d`，**从不说明值实际经过哪些 PE**。真正的走线仍由 mapper 的
+A*（`PathFinderMapper::estimateRouting`）逐节点贪心生成，所以一个在聚合意义下
+合法的放置，仍可能被 mapper 拒掉——这正是 strict 模式下 mac/trmm 报
+`pin (1,1,1) not among 16 candidate(s)` 的原因。
+
+`ilp_router.py` 补上这一层：**给定放置，把每条边真正布出来，或者证明布不出来。**
+
+### 8.1 资源图：直接由 `PE.CONNECTIONS` 推出
+
+从 `arch.json` 的 `PE.CONNECTIONS` 逐条读出 HyCUBE 的微架构：
+
+```
+FU0.DP0_T -> {NORTH_O, EAST_O, WEST_O, SOUTH_O, TREG}      # 到四个输出口不花周期
+X_I       -> {XR, X_XBARI}                                  # XR 是 1 拍输入寄存器
+X_XBARI   -> {FU0.DP0_I1, FU0.DP0_I2, FU0.DP0_P, *_O}
+TREG      -> {FU0.DP0_I1, FU0.DP0_I2, FU0.DP0_P, *_O}
+```
+
+一个值从 FU 输出口出发，经输出口同拍到达邻居的输入口，再穿交叉开关到 FU 输入端，
+**全程同一拍**。唯一能花掉一拍的地方就是过一次寄存器：输出侧的 `TREG`，或输入侧的
+`NR/ER/WR/SR`。于是资源图的节点是 `(x, y, t)`（`t` 对 II 取模），只有两种弧：
+
+| 弧 | 形状 | 代价 |
+| --- | --- | --- |
+| bypass | `(x,y,t) -> (x±1,y,t)` / `(x,y±1,t)` | 1 hop，0 cycle |
+| register | `(x,y,t) -> (x,y,t+1)` | 0 hop，1 cycle |
+
+一条 DFG 边 `u -> v` 就是一单位流，从**生产者的输出时刻** `(t_u + lat_u) mod II`
+出发，流到消费者所在 PE 的相位 `t_v`。因此流经过的 register 弧数恒等于
+`ilp_mapper.py` 的 `d`，bypass 弧数恒等于 `h`——两层用的是同一个时序模型。
+
+### 8.2 组播：容量按生产者算，不按边算
+
+基线 `routeInfo.log` 里 node 0 的三个孩子共享**同一条第一跳**
+`PE_X1_Y2-T0.EAST_O -> PE_X2_Y2-T0.WEST_I`。所以一个生产者的值可以在一条弧上广播，
+两个不同生产者则不行。实现上用 `y[prod][arc]` 布尔变量做或运算，每条弧
+`sum(不同生产者) <= cap`。这等价于 CGRA-ME `ILPMapper` 里的扇出变量 `S`。
+
+### 8.3 用法
+
+```bash
+# 布一个给定放置
+.venv/bin/python tools/ilp/ilp_router.py \
+    --dfg out/mac/dfg.xml --arch out/mac/arch.json \
+    --pins /tmp/pins_mac_bypass.txt --ii 4 --time-limit 90 \
+    -o /tmp/routes_mac.json
+
+# 与 mapper 自己的 A* 逐边对比空间跳数
+.venv/bin/python tools/ilp/ilp_router.py ... \
+    --compare-routeinfo out/mac/m0/dfg.xmlarch.json_MTP=1_Iter=1.routeInfo.log
+```
+
+`--pins` 的格式是每行 `idx x y t`，与 `tools/pins/extract_pins.py` 的输出一致；
+`t < 0` 的相位未知项不能布线，会直接报错。`--link-capacity` / `--reg-capacity`
+默认 1，`--max-hops` 默认 4。
+
+### 8.4 三组实测
+
+**(a) 与 `ilp_mapper.py` 的代价函数逐项吻合（5/5）**：同一放置下，router 解出的
+register 总数正好等于 `ilp_mapper` 目标里的 `d`，hops 等于 `h`：
+
+| kernel / 模式 | ilp_mapper `h/d` | ilp_router `hops/regs` |
+| --- | --- | --- |
+| array_add bypass | 10 / 6 | 10 / 6 |
+| mac bypass | 15 / 7 | 15 / 7 |
+| mac register | 28 / 32 | 28 / 32 |
+| trmm bypass | 3 / 5 | 3 / 5 |
+| trmm register | 7 / 13 | 7 / 13 |
+
+**(b) 与 mapper 的 A* 在同一放置下逐边对比空间跳数**（`--compare-routeinfo`）：
+CP-SAT 布出的路径**不劣于** A*，且多数边更短。差异边全是 CP-SAT 更短：
+mac `20019` 5 vs 9、trmm `7` 2 vs 4、trmm `20008` 4 vs 6。三者总耗时 0.2–1.1 s。
+
+**(c) 决定性结果——被 strict 拒掉的放置其实可布**：把 mapper strict 模式拒绝过的
+放置喂给 router，全部 **OPTIMAL**，用时不到 1 秒：
+
+| kernel | 放置来源 | mapper strict | ilp_router |
+| --- | --- | --- | --- |
+| mac | `--timing bypass` | `pin (1,1,1) not among 16 candidate(s)` 失败 | hops=15 regs=7，0.56 s |
+| trmm | `--timing bypass` | `pin (0,2,3) not among 14 candidate(s)` 失败 | hops=3 regs=5，0.21 s |
+
+结论：**这些放置本身是可布的，瓶颈在 mapper 逐节点贪心的 A\* 估计，不在放置。**
+
+### 8.5 已知限制（必须诚实标注）
+
+1. **端口级争用被折叠了**。容量按"PE 间链路 / 该 PE 的寄存器"计，没有区分
+   `NORTH_XBARI` / `EAST_XBARI` 等具体交叉开关端口，也没区分输入侧 `NR/ER/WR/SR`
+   与输出侧 `TREG` 的独立容量。所以模型对端口冲突是**略乐观**的——它比原来的
+   "只知道跳数"严格得多，但还不是逐端口精确。
+2. **不产生 mapper 能读的布线文件**。acc-thu 的 mapper 只接受 `--pins`（放置），
+   没有"按给定路线落位"的入口（cac 里的 `--verify` 模式没有搬过来）。所以 router
+   的路径目前只用于**判定与量化**，不是直接驱动 mapper。
+3. 组播是"同生产者免费共享弧"，但没有建模"一个值可以同时送往多个方向的多个端口"
+   的端口数上限。
+4. 大规模 kernel 上变量数为 `边数 × 弧数`，弧数 ≈ `4·x·y·II + x·y·II`；4×4、II=4
+   约 256 条弧，够用；8×8 或大 II 会明显变慢。
+
+### 8.6 下一步（按价值）
+
+1. 把 router 做成 `ilp_mapper.py` 的**可行性过滤器**：放置解出来 → 布线 → 不通就
+   作为 no-good 回灌（两阶段闭环，就是 CGRA-ME `ILPHeuristicMapper` 的做法）。
+2. 给 mapper 加 `--routes`（按外部路线落位），让 router 的路径真正驱动仿真。
+3. 把端口级容量加进资源图（限制每个 crossbar 输入端的扇入）。
