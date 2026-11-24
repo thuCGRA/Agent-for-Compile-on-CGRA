@@ -1,0 +1,201 @@
+diff -ruN snap5b/mapper/include/morpher/mapper/SimulatedAnnealingMapper.h snap6/mapper/include/morpher/mapper/SimulatedAnnealingMapper.h
+--- a/include/morpher/mapper/SimulatedAnnealingMapper.h	2026-11-24 04:34:30.827826923 +0000
++++ b/include/morpher/mapper/SimulatedAnnealingMapper.h	2026-11-24 04:34:30.883826245 +0000
+@@ -41,6 +41,19 @@
+ 	void seedRng(unsigned s) { rng.seed(s); }
+ 	bool forceAnneal = false;
+ 
++	// M1.5: 两个邻域算子的策略。0 = 上游行为（纯随机 / 洗牌取首个），
++	// 1 = 有依据的挑选。默认 0，保证 M0/M1 的结论不被悄悄改掉。
++	int selectStrategy = 0;
++	int pickStrategy = 0;
++
++	// 一个节点"有多该被挪"：所在 PE 上还挤了几个节点 + 已布线边上多绕了几跳。
++	// 只用现在就能算的信息，不假装知道布线能不能通（那要 SARoute 才知道）。
++	int nodeBlame(DFGNode *node);
++
++	// 一个候选 DP 有多好：到已放置邻居的曼哈顿距离之和 * 2 + 该 PE 的占用数。
++	// 便宜的代理指标，用来在 .front() 之前把明显更远的候选排到后面。
++	int candidateScore(DataPath *dp, DFGNode *node);
++
+ 	// 把当前 dfg_node_placement 落盘（mapping.csv / routeInfo.log / mappingwithlatency.txt）。
+ 	// 上游只在 HeuristicMapper::Map() 的成功路径里写这些文件，SAMap() 不经过那段，
+ 	// 所以 SA 的产物一直是 0 字节。
+diff -ruN snap5b/mapper/include/morpher/util/util.h snap6/mapper/include/morpher/util/util.h
+--- a/include/morpher/util/util.h	2026-11-24 04:34:30.827826923 +0000
++++ b/include/morpher/util/util.h	2026-11-24 04:34:30.883826245 +0000
+@@ -50,6 +50,8 @@
+ 	// 返回，所以它只是个可行性搜索器，从不优化。置 true 让它在可行之后继续退火，
+ 	// 最后回滚到代价最小的那个可行快照。
+ 	bool sa_optimize = false;
++	int sa_select = 0;   // M1.5: 0=上游随机 1=按 blame 挑节点
++	int sa_pick = 0;     // M1.5: 0=上游洗牌取首个 1=按距离排序
+ 	int sa_budget = 0;
+ 	// M1: 约束文件（JSON），空表示无约束
+ 	std::string constraints_file; // 移动次数上限，0 = 不限（上游行为）
+@@ -150,6 +152,8 @@
+ 		.add_option<int>("", "--sa_seed", "RNG seed for SA (same seed => same mapping)", 20136)
+ 					.add_option<bool>("", "--sa_force_anneal", "SA: anneal even if the PathFinder warm start is already valid", false)
+ 		.add_option<bool>("", "--sa_optimize", "SA: keep annealing after feasibility and return the cheapest valid snapshot", false)
++		.add_option<int>("", "--sa_select", "SA: node selection 0=random(upstream) 1=blame-ranked", 0)
++		.add_option<int>("", "--sa_pick", "SA: candidate pick 0=shuffle(upstream) 1=distance-ranked", 0)
+ 		.add_option<int>("", "--sa_budget", "SA: max number of moves (0 = unlimited)", 0)
+ 		.add_option<std::string>("", "--constraints", "JSON file with pins/forbidden (M1)", "")
+ 		.add_option<std::string>("", "--arch_name", "architecture name", "")
+@@ -173,6 +177,8 @@
+ 	ret.sa_force_anneal = args.get_option<bool>("--sa_force_anneal");
+ 	ret.sa_seed = args.get_option<int>("--sa_seed");
+ 	ret.sa_optimize = args.get_option<bool>("--sa_optimize");
++	ret.sa_select = args.get_option<int>("--sa_select");
++	ret.sa_pick = args.get_option<int>("--sa_pick");
+ 	ret.sa_budget = args.get_option<int>("--sa_budget");
+ 	ret.constraints_file = args.get_option<std::string>("--constraints");
+ 	ret.use_json = true;
+diff -ruN snap5b/mapper/src/CGRA_xml_compiler.cpp snap6/mapper/src/CGRA_xml_compiler.cpp
+--- a/src/CGRA_xml_compiler.cpp	2026-11-24 04:34:30.827826923 +0000
++++ b/src/CGRA_xml_compiler.cpp	2026-11-24 04:34:30.883826245 +0000
+@@ -91,6 +91,8 @@
+ 		static_cast<SAMapper *>(mapper)->seedRng((unsigned)args.sa_seed);
+ 				static_cast<SAMapper *>(mapper)->forceAnneal = args.sa_force_anneal;
+ 		static_cast<SAMapper *>(mapper)->optimizeAfterFeasible = args.sa_optimize;
++		static_cast<SAMapper *>(mapper)->selectStrategy = args.sa_select;
++		static_cast<SAMapper *>(mapper)->pickStrategy = args.sa_pick;
+ 		static_cast<SAMapper *>(mapper)->moveBudget = args.sa_budget;
+ 		
+ 		// assert(false && "convert to SA");
+diff -ruN snap5b/mapper/src/mapper/SimulatedAnnealingMapper.cpp snap6/mapper/src/mapper/SimulatedAnnealingMapper.cpp
+--- a/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-24 04:34:30.827826923 +0000
++++ b/src/mapper/SimulatedAnnealingMapper.cpp	2026-11-24 04:34:30.883826245 +0000
+@@ -547,12 +547,91 @@
+ 	return (float(accepted_number)) / movement_in_each_temp;
+ }
+ 
++int CGRAXMLCompile::SAMapper::nodeBlame(DFGNode *node)
++{
++	int blame = 0;
++
++	// 1) 时分复用下的槽位压力：这个节点所在 PE 上还挤了几个别的节点
++	auto it = dfg_node_placement.find(node);
++	if (it != dfg_node_placement.end() && it->second.first != NULL)
++	{
++		PE *myPE = it->second.first->getPE();
++		int same = 0;
++		for (auto &kv : dfg_node_placement)
++			if (kv.first != node && kv.second.first != NULL && kv.second.first->getPE() == myPE)
++				same++;
++		blame += 3 * same;
++	}
++
++	// 2) 绕行：与它相连、已经布线的边上多走了几跳（1 跳是相邻，多出来的算绕）
++	for (auto &kv : data_routing_path)
++	{
++		if (kv.first.first != node && kv.first.second != node)
++			continue;
++		int hops = (int)kv.second.size();
++		if (hops > 1)
++			blame += hops - 1;
++	}
++
++	return blame;
++}
++
++int CGRAXMLCompile::SAMapper::candidateScore(DataPath *dp, DFGNode *node)
++{
++	PE *pe = dp->getPE();
++	if (pe == NULL)
++		return 1 << 20;
++
++	int dist = 0;
++	auto addNeighbour = [&](DFGNode *other) {
++		auto it = dfg_node_placement.find(other);
++		if (it == dfg_node_placement.end() || it->second.first == NULL)
++			return; // 邻居还没放，这一项不参与
++		PE *o = it->second.first->getPE();
++		dist += std::abs(pe->getPosition_X() - o->getPosition_X())
++		      + std::abs(pe->getPosition_Y() - o->getPosition_Y());
++	};
++	for (DFGNode *p : node->parents)
++		addNeighbour(p);
++	for (DFGNode *c : node->children)
++		addNeighbour(c);
++
++	int occ = 0;
++	for (auto &kv : dfg_node_placement)
++		if (kv.second.first != NULL && kv.second.first->getPE() == pe)
++			occ++;
++
++	return 2 * dist + occ;
++}
++
+ CGRAXMLCompile::DFGNode *CGRAXMLCompile::SAMapper::selectDFGNodeToUnmap()
+ {
+ 
+ 	// M1.5: 用成员 rng（可 --sa_seed），不再每次调用都重新播种真随机源
+ 	std::mt19937 &e1 = rng;
+ 	std::uniform_int_distribution<int> uniform_dist(0, sortedNodeList.size() - 1);
++
++	if (selectStrategy == 1 && !sortedNodeList.empty())
++	{
++		// 按 blame 从大到小取前 K 名，再在其中随机选一个。
++		// 保留随机性是故意的：SA 需要能走"看起来不划算"的移动，
++		// 否则邻域退化成贪心，温度这个参数就没意义了。
++		const int K = 4;
++		std::vector<std::pair<int, DFGNode *>> ranked;
++		ranked.reserve(sortedNodeList.size());
++		for (DFGNode *n : sortedNodeList)
++			ranked.push_back(std::make_pair(nodeBlame(n), n));
++		std::stable_sort(ranked.begin(), ranked.end(),
++			[](const std::pair<int, DFGNode *> &a, const std::pair<int, DFGNode *> &b) {
++				return a.first > b.first;
++			});
++		int k = (int)ranked.size() < K ? (int)ranked.size() : K;
++		std::uniform_int_distribution<int> pick(0, k - 1);
++		DFGNode *chosen = ranked[pick(rng)].second;
++		LOG(SA) << "selectStrategy=1: top blame=" << ranked[0].first << " pick node " << chosen->idx << "\n";
++		return chosen;
++	}
++
+ 	return sortedNodeList[std::abs(std::round(uniform_dist(e1)))];
+ 
+ 	// select random node;
+@@ -1047,8 +1126,38 @@
+ 		}
+ 	}
+ 
+-	// M1.5: 候选表洗牌也走 rng（上游用 system_clock 当种子，无法复现）
+-	shuffle(candidateDests.begin(), candidateDests.end(), rng);
++	if (pickStrategy == 1 && !candidateDests.empty())
++	{
++		// 上游是"洗牌后由调用方取 .front()"——等价于随机挑一个候选。
++		// 这里改成按 candidateScore 升序；同分之间再打散，
++		// 否则永远取同一个方向的 PE，等于把随机性彻底去掉。
++		std::vector<std::pair<int, DataPath *>> scored;
++		scored.reserve(candidateDests.size());
++		for (DataPath *dp : candidateDests)
++			scored.push_back(std::make_pair(candidateScore(dp, node), dp));
++		std::stable_sort(scored.begin(), scored.end(),
++			[](const std::pair<int, DataPath *> &a, const std::pair<int, DataPath *> &b) {
++				return a.first < b.first;
++			});
++		for (size_t i = 0; i < scored.size();)
++		{
++			size_t j = i;
++			while (j + 1 < scored.size() && scored[j + 1].first == scored[i].first)
++				j++;
++			std::shuffle(scored.begin() + i, scored.begin() + j + 1, rng);
++			i = j + 1;
++		}
++		candidateDests.clear();
++		for (auto &p : scored)
++			candidateDests.push_back(p.second);
++		LOG(SA) << "pickStrategy=1: best candidate score=" << scored.front().first
++		        << " for node " << node->idx << "\n";
++	}
++	else
++	{
++		// M1.5: 候选表洗牌也走 rng（上游用 system_clock 当种子，无法复现）
++		shuffle(candidateDests.begin(), candidateDests.end(), rng);
++	}
+ 
+ 	return candidateDests;
+ }
