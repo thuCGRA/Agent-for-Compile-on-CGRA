@@ -113,3 +113,52 @@ $PY cli_agent.py recall --kernel mac
 - **`cost` 只看 detour/hops/select_pairs**，不含延迟和功耗。SA 用另一套目标
   （`unmapped*100 + congestion*10 + conflict*10 + shaping`），两者错位——
   这正是"预算越多 SA 越差"的原因。
+
+## 8. LLM 的调度过程与思维链实测
+
+`scripts/probe_cot.py` 把 `LLMPolicy` **真实使用的那份 prompt** 原样发出去，再把
+`reasoning_content` 原文打出来。只看 `content` 看不出调度质量的差别——推理的思考全在
+`reasoning_content` 里。
+
+### 8.1 修 prompt 前：模型被自己看到的错误信息带跑
+
+「已尝试」那几行对**通过**的那一次也打印 `首个失败门=G1()`（判断条件写成了
+`passed and "G1" or next(...)`）。模型的原文（决策点 2，共 1098 字符）：
+
+> Config 1: pathfinder ii=4 ok=True lat=0 cost=36.0 — wait that seems already successful?
+> Actually "ok=True lat=0 cost=36.0" with 首个失败门=G1() — hmm, actually the first entry
+> says ok=True but 首个失败门=G1()? That's contradictory. … Give the attribution says all
+> gates passed — so nothing failed. So the mapper solved it.
+
+一段本该 200 字结束的推理，被一个字段的错误含义拖成了 1098 字的自我矛盾。
+
+同一时期还有第二个坑：prompt 没告诉它 `II` 低于 RecMinII 会被 mapper 抬回，于是真实运行
+（`work/m2_llm_array_add.json`）三次决策里两次在动 II：`pathfinder ii=2` → `sa(...)` →
+`pathfinder ii=3`，而 `II = max(recII, resII, userII)` 使这两次都是空操作。
+
+### 8.2 修完后：1098 字符 → 187 字符，结论不变但理由正确
+
+同一个决策点（pathfinder cost 36 lat 0 已通过、sa cost 43 更差、只剩 1 次），修后的
+`reasoning_content` 全文：
+
+> We have cost=36 pathfinder, lat=0 already best. Only 1 attempt left. SA tried multiple,
+> worse. Should stop - already have best solution at cost 36, pathfinder. Repeating won't
+> help. Stop.
+
+它甚至引用了经验库里的历史（见 8.3）：`SA 各配置（budget 1000/8000、cost_mode）均更差(43/38)`。
+
+### 8.3 经验：此前是"只写不读"
+
+- `experience/store.py` 已记录 **17 条案例**，`recall(kernel, n_nodes, ii, tol=4)`
+  能按规模取回；但 `grep -rn "recall"` 显示只有 `cli_agent.py recall` 子命令在用，
+  **策略侧从未调用** → 跨运行经验实际为 0，只有单次运行内的「最近 6 条 history」。
+- 现已接入：`LLMPolicy(store=...)` 把 `recall(...)` 渲染成
+  `## 历史相似案例（经验库，跨运行）` 注入 prompt（只读，不参与判据）。实测模型确实读了
+  并据此判断"SA 无法超越 36"。
+
+### 8.4 结论
+
+- **prompt 的信息质量直接决定决策质量**：同一模型、同一状态，改三行描述，思维链从
+  1098 字的自我矛盾变成 187 字的干净判断，预算从"3 次用满"变成"1 次收手"。
+- **但决策质量 ≠ 结果质量**：动作空间的上限仍是热启动（= PathFinder cost 36），
+  所以 cost 一分不降。这个上限只能由 A2（区域分解）或 A3（硬约束）打破——M3 的任务。

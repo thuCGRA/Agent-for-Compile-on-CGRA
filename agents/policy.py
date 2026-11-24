@@ -63,12 +63,14 @@ class ScriptedPolicy:
 class LLMPolicy:
     name = "llm"
 
-    def __init__(self, client: Optional[LLMClient] = None, no_thinking: bool = False):
+    def __init__(self, client: Optional[LLMClient] = None, no_thinking: bool = False,
+                 store=None):
         self.client = client or LLMClient(no_thinking=no_thinking)
         # 备用客户端：推理通道吃光 max_tokens 时正文会是空的（finish_reason=length）。
         # 这不是"模型没主意"，是装置故障；降级为关思考再问一次，并把这次降级记账。
         self.quiet_client = None if no_thinking else LLMClient(no_thinking=True)
         self.fallback = ScriptedPolicy()
+        self.store = store             # 经验库：只读注入 prompt，不参与判据
         self.failures = []            # 装置失败（解析失败/端点错误），单独记账
 
     # ------------------------------------------------------------------ prompt
@@ -78,20 +80,33 @@ class LLMPolicy:
         aud = state.get("audit") or {}
         lines = []
         for i, h in enumerate(hist[-6:], 1):
+            g = h.get("gates") or {}
+            if h.get("ok"):
+                # 通过的那一次没有"首个失败门"——这里以前错写成 G1，
+                # 模型会当成"G1 挂了但又 ok=True"，白白花几百字纠结（实测过）。
+                first_fail = "四门全过"
+            else:
+                first_fail = next((k for k in ("G1", "G2", "G3", "G4")
+                                   if not g.get(k, {}).get("passed", True)), "-")
             lines.append(
-                "%d) backend=%s ii=%d params=%s -> ok=%s lat=%s cost=%s | 首个失败门=%s(%s)"
+                "%d) backend=%s ii=%d params=%s -> ok=%s lat=%s cost=%s | %s%s"
                 % (i, h["backend"], h["ii"], h["params"], h["ok"],
-                   h["lat"], h["cost"],
-                   (h.get("gates", {}).get("G1", {}).get("passed") and "G1" or
-                    next((k for k in ("G1", "G2", "G3", "G4")
-                          if not h.get("gates", {}).get(k, {}).get("passed", True)), "-")),
-                   (h.get("gates", {}).get("G1", {}).get("reason") or "")[:80]))
+                   h["lat"], h["cost"], first_fail,
+                   ("：" + (g.get("G1", {}).get("reason") or "")[:70])
+                   if not h.get("ok") else ""))
+        best = state.get("best") or {}
+        exp = self._recall_lines(state)
         system = (
             "你在调度一个 CGRA 映射器（Morpher）。你不决定任何节点的坐标，"
             "只能选后端、给约束、调 II。\n"
             "唯一的功能真值是仿真器（G1）。mapper 自己说 Map Success 不算过。\n"
-            "已知事实：SA 在热启动可行时几乎不动（单节点移动基本都让代价变差）；"
-            "PathFinder 更稳；II 抬高一级常常能避开 SELECT 同拍断言。\n"
+            "已知事实：\n"
+            "- SA 的热启动是贪心的 PathFinder 式放置；热启动可行时上游 SA 几乎不动。\n"
+            "- 我们的 cost = detour + hops + select_pairs，SA 自己的目标函数不含延迟/布线，"
+            "所以 SA 常常 cost 更差、lat 更差。\n"
+            "- II 低于 RecMinII 会被 mapper 自动抬回（本项目 3 个 kernel 的 RecMinII 都是 4），"
+            "把 ii 设成比它小是空操作，不要这么做。\n"
+            "- 已经有合法解时，目标是降低 cost（其次 lat）；重复跑同配置是浪费预算。\n"
             "只能返回一个 JSON 对象，不要解释。字段：\n"
             '  {"action": "set_backend", "backend": "pathfinder|sa", '
             '"params": {...}, "ii": <int>, "why": "<一句>"}\n'
@@ -102,16 +117,40 @@ class LLMPolicy:
             "cost_mode(0/1)。\n"
             "预算有限：每多一次尝试就少一次机会。已经测过的配置不要重复。"
         )
+        best_txt = ("cost=%s lat=%s（backend=%s）" % (best.get("cost"), best.get("lat"),
+                                                     best.get("backend"))
+                    if best else "（还没有合法解）")
         user = (
             "## 当前问题\n%s\n\n## 已尝试（按时间顺序）\n%s\n\n"
-            "## 上一次失败的归因\n%s\n\n## 还能用的预算\n剩余尝试次数：%d\n\n"
+            "## 当前最好解\n%s\n\n%s"
+            "## 上一次尝试的归因\n%s\n\n## 还能用的预算\n剩余尝试次数：%d\n\n"
             "给出下一步动作的 JSON。"
-            % (facts, "\n".join(lines) or "（无）",
+            % (facts, "\n".join(lines) or "（无）", best_txt, exp,
                json.dumps(aud, ensure_ascii=False) if aud else "（无）",
                max(0, state.get("budget", 0) - state.get("used", 0)))
         )
         return [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
+
+    def _recall_lines(self, state: dict) -> str:
+        """把经验库里同规模历史案例塞进 prompt（只读，不影响判据）。"""
+        if self.store is None:
+            return ""
+        try:
+            rows = self.store.recall(state.get("kernel", ""),
+                                     int(state.get("n_nodes") or 0),
+                                     int(state.get("ii") or 4), limit=4)
+        except Exception:                      # 经验库坏了不该拦住决策
+            return ""
+        if not rows:
+            return ""
+        lines = ["## 历史相似案例（经验库，跨运行）"]
+        for r in rows:
+            lines.append("  - %s %s ii=%s -> ok=%s cost=%s lat=%s%s"
+                         % (r["backend"], r.get("params"), r.get("ii"), r.get("ok"),
+                            r.get("cost"), r.get("lat"),
+                            ("（%s）" % r["cls"]) if r.get("cls") not in ("", "ok") else ""))
+        return "\n".join(lines) + "\n\n"
 
     # ------------------------------------------------------------------ decide
     def suggest(self, state: dict) -> dict:

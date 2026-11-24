@@ -54,7 +54,7 @@ def one_baseline(kernel: str, ii: int, arm: str, root, do_sim: bool) -> dict:
 def one_agent(kernel: str, ii: int, arm: str, budget: int, root, do_sim: bool,
               store) -> dict:
     t0 = time.time()
-    policy = LLMPolicy() if arm == "llm" else ScriptedPolicy()
+    policy = LLMPolicy(store=store) if arm == "llm" else ScriptedPolicy()
     res = run_agent(kernel, ii=ii, budget=budget, policy=policy, store=store,
                     root=root, do_sim=do_sim)
     b = res["best"] or {}

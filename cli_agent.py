@@ -84,7 +84,7 @@ def main():
 
     store = None if args.no_store else Store()
     if args.policy == "llm":
-        policy = LLMPolicy(no_thinking=args.no_thinking)
+        policy = LLMPolicy(no_thinking=args.no_thinking, store=store)
     else:
         policy = ScriptedPolicy()
     res = run_agent(args.kernel, ii=args.ii, budget=args.budget, policy=policy,

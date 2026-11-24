@@ -55,11 +55,13 @@ def facts_text_of(prob: dict) -> str:
         deg[e[0]] = deg.get(e[0], 0) + 1
     hottest = sorted(deg.items(), key=lambda kv: -kv[1])[:5]
     return ("kernel=%s  nodes=%d  edges=%d  array=%dx%d\n"
-            "op 直方图(前8): %s\n出度最大的节点: %s"
+            "op 直方图(前8): %s\n出度最大的节点: %s\n"
+            "资源下界 res_min_ii=%s（II 低于 RecMinII 时 mapper 会自动抬回，低报无效）"
             % (prob["kernel"], prob["n_nodes"], len(prob["edges"]),
                prob["xdim"], prob["ydim"],
                ", ".join("%s×%d" % kv for kv in top),
-               ", ".join("#%d(%d)" % kv for kv in hottest)))
+               ", ".join("#%d(%d)" % kv for kv in hottest),
+               prob.get("res_min_ii", "?")))
 
 
 def _better(att, best: dict) -> bool:
@@ -184,6 +186,7 @@ def run_agent(kernel: str, ii: int = 4, budget: int = 4, policy=None,
     }
     prob0 = load_problem(kernel, ii, root)
     state["facts_text"] = facts_text_of(prob0)
+    state["n_nodes"] = prob0["n_nodes"]
 
     graph = build_graph(policy, store, stop_on_first_ok=stop_on_first_ok)
     if graph is not None:
