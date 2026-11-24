@@ -14,24 +14,68 @@
 | 4 | 但**「mapper 说 Map Success」≠「硬件可执行」**：`conv2` 用 CP-SAT 放置 + A* 布线，mapper 报成功、II=4，模拟器同样触发 dual-issue 断言。 | §5 |
 | 5 | **CP-SAT 放置模型偏紧**：`gemm`(49 节点, II=9)、`gemm_w2`(58, II=7)、`microspeech_4`(50, II=8) 判 INFEASIBLE，而 PathFinder 在同 II 上映射成功。根因已定位：`--route-cycles` 缺省 1（每边最多过 1 个寄存器）→ 改成 3 后 `gemm` II=9 变 FEASIBLE。 | §6 |
 
-## 1 覆盖情况：48 个 test case 里 23 个能跑
+## 1 覆盖情况：`kernels/` 里 48 个 .c，只有 23 个能出 DFG
 
-`scripts/kernels.tsv` 有 48 条（22 个原生 kernel + 26 个 `pb_*`）。能不能生成 DFG：
+> **更正（2026-11-25）**：本节初版把"polybench 跑不了"归因成 Morpher 的固有限制，这是**错的**。
+> 查清后有三个各自独立的原因，见 §1.0。
 
-- ✅ **23 个可跑**：22 个原生 kernel（`array_add array_cond conv2 conv2d_2x2 conv2d_3x3 conv3 fir gemm gemm_w1 gemm_w2 gemm_w3 hpcg mac mac2 microspeech_1..4 mults1 mults2 sum trmm`）+ `pb_2mm`
-- ❌ **25 个 polybench 生成不出 DFG**。原因不是脚本问题，是 DFG pass 的硬限制：
-  ```
-  LLVM ERROR: morpher DFG pass: unsupported memory access through a multi-level pointer
-  (e.g. `int **A; A[i][k]`); the base pointer is not a GEP on a named array.
-  Flatten the array to 1-D or use `int *A`.
-  ```
-  `kernels/pb_*/pb_*.c` 这批 stub 声明的是 `volatile int **A;`（2-D/3-D 指针），访问 `A[i][k]`。
-  把声明换成全局命名数组 `int A[512];` 还不够——`A[i*n+j]` 在 -O2 下下标被提到循环外，形成
-  **两级 GEP**，pass 同样拒绝；`A[i][j]` 常量折叠成**常量表达式 GEP**（不是指令）也被拒绝。
-  唯一被接受的形式是单层仿射下标（`A[i+j]`），见 `tools/ilp/pb_convert.py` + `scripts/pb_build.sh`。
-  `pb_2mm` 就是按这个路子改出来的（24 节点 / 31 边）。
-  → 要让 26 个 polybench 全部可用，需要**重写这 26 个 stub 的循环体**（真正 flatten 成 1-D 且
-  下标保持仿射），而不是做文本替换。这是一件独立的、可估工时的活。
+### 1.0 为什么 25 个 polybench case 跑不了（三条独立原因）
+
+**(1) 直接报错的那句话是我们自己加的补丁，不是 Morpher 的。**
+`src/dfggen/src/common/dfg.cpp` 里共有 5 处 `morpher-THU fix`（合计 60 行改动），其中
+`:11397`（load）与 `:11427`（store）把 upstream 的
+
+```cpp
+assert(arr_ptrs.find(ptr) != arr_ptrs.end());
+```
+
+换成了
+
+```cpp
+if (arr_ptrs.find(ptr) == arr_ptrs.end() || arr_ptrs[ptr] == nullptr) {
+    report_fatal_error(llvm::Twine("morpher DFG pass: unsupported memory access through "
+        "a multi-level pointer (e.g. `int **A; A[i][k]`); ..."), false);
+}
+```
+
+upstream `~/morpher/Morpher_DFG_Generator/src/common/dfg.cpp` 里 `morpher-THU` 出现 **0 次**，
+且与我们这份的 diff 就是这 60 行。也就是说：**这条 `LLVM ERROR` 是本工程引入的**（本意是把
+Release 下的空指针崩溃变成可读报错，这个动机本身是对的）。
+
+**(2) `benchmarks/woset_benchmarks/polybench/*/*.c` 是 upstream 自己提交的残缺 stub。**
+它们来自 upstream 子模块 commit `b88b372 "updating benchmark kernel"`，内容是
+`volatile int **A; ... sum += alpha * A[i][k] * B[k][j];`，而 `i`、`j` **从未被赋值**，整个
+文件只剩一个 `for (k=...)`。这不是 PolyBench 源码，是被人手工剪过的骨架。任何版本的 DFG pass
+都编不出正确 DFG（upstream 行为：assert 在 Release 下被 NDEBUG 去掉 → `arr_ptrs[ptr]` 取到
+nullptr → `->getPointerOperand()` 直接段错误）。
+
+**(3) 我们 vendor 时把真正能跑的那批产物删掉了。**
+upstream `Morpher_CGRA_Mapper/applications/`（38 MB）里有约 20 个真实 kernel 的**预生成 DFG**：
+
+| 目录 | 内容 |
+|---|---|
+| `applications/polybench/` | 10 个真 DFG：`2mm.xml`(28 节点) `2mm_unroll4.xml`(61) `atax.xml`(24) `atax_unroll4`(54) `bicg.xml`(31) `bicg_unroll3`(63) `cholesky.xml`(26) `cholesky_unroll4`(59) `doitgen.xml`(27) `doitgen_unroll4`(63) |
+| `applications/{adpcm_coder,adpcm_decoder,aes_encrypt,aes_decrypt,compare_neighb,dct,dwt,finalSAD,fix_fft_npb,gemm_nt,nw,pedometer,realgsm,taylor}/` | 各 1–2 个 `*_PartPred_DFG.xml` / `*_FullPred_DFG.xml` |
+| `applications/cgra_me_bench/` | `accumulate cap conv2 conv3 mac mac2 matrixmultiply mults1 ...` |
+| `applications/hycube/` | `aes array_add fft gemm_2x2x2 gemm_no_unroll hpcg pedometer` |
+| `applications/sample_xmls/` | 37 MB 示例 DFG，部分带 `*.mapping.csv` |
+
+`PROVENANCE.md` 把 `applications/`（38 MB）列在"删掉清单"里 —— 删的正是这批 case。
+
+### 1.1 现在 `kernels/` 的实际可用性
+
+- ✅ **22 个原生 kernel** 能出 DFG（`array_add array_cond conv2 conv2d_2x2 conv2d_3x3 conv3 fir gemm gemm_w1 gemm_w2 gemm_w3 hpcg mac mac2 microspeech_1..4 mults1 mults2 sum trmm`）
+- ➕ `pb_2mm` 经 `tools/ilp/pb_convert.py` 把 `int **` 拍平成 1-D 后能出 DFG（24 节点，II=6 可映射）
+- ❌ **其余 25 个 polybench stub** 出不了 DFG，原因见 §1.0 (1)(2)
+
+所以表 A/B 的 23 个 case 没问题；**"48 个里只有 23 个能跑"这个说法要限定为"`kernels/` 里的 .c"**，
+它不代表 Morpher 的能力上限 —— 上限要高得多，因为 `applications/` 里还有约 20 个预生成 DFG。
+
+### 1.2 预生成 DFG 的可用性（已实测，尚未打通）
+
+- 结构上与我们生成的 DFG **完全同构**（同样的 `<Node idx ASAP ALAP BB CONST>` / `<Inputs><Output idx nextiter NPB type>` / `<RecParents>` / `<GEPOffset>`；idx 同样非连续，同样有 `20025/20026` 这种大号节点；max ASAP 同为 9）。
+- 但直接把 `applications/polybench/2mm.xml`(28 节点) 喂我们的 mapper，会在打印 `Initial target II = 4` 后**静默 `rc=1`** 退出（`-i 0/6/8` 都一样），没有任何 `Map Failed!` 输出。说明问题在 `parseXML` 或 `new CGRA(...)` 阶段，不在搜索阶段。
+- 同一个 arch（`out/pb_2mm/arch.json`，注意它的 `DATA_LAYOUT` 是 `None`，说明 `inject_mem` 没写进去）映射我们自己的 24 节点 `dfg.xml` 是正常的（II=6）。→ **arch 没问题，是那份 xml 的某处不被解析器接受**，还需再定位（估 1–2 h）。
 
 ## 2 参与比较的四种东西
 
