@@ -1,5 +1,7 @@
 # 06 · placing / routing 算法横评（48 个 test case）
 
+> **更新（见 [07-coverage.md](07-coverage.md)）**：本文写的"48 个里只有 23 个能跑"是当时的口径。补上上游预生成 DFG 之后可跑 **41 个**；本文的表 A/B/C 仍然有效（那是原生 kernel 上的结果），表 D/E 在 07 里。
+
 > 目的：把「PathFinder（mapper 自带）」「上游 SA」「CP-SAT 放置」「CP-SAT 布线」放在同一批
 > kernel、同一 II 下比较，看看各自的实际效果，以及外部放置能不能被真实 mapper 吃下去。
 > 所有数字都是本机（`~/acc-thu-ilp`，分支 `ilp-mapper`）实测，命令见 §7。
