@@ -11,7 +11,7 @@ mem_alloc** 的（mem_alloc 本来是 run_morpher.py 在跑插桩程序时产出
 所以这里做的是：把 DFG 里出现过的全部 base pointer 都分配一个地址，按 bank 大小装箱。
 
 布局约定（与 run_morpher.py 产出的真实 mem_alloc 对齐）：
-  loopend   -> bank_size - 1                    （2047，模拟器的哨兵地址）
+  loopend   -> bank_size*banks/2 - 1            （2 bank×2048 时 = 2047，模拟器的哨兵地址）
   loopstart -> bank_number * bank_size - 2      （4094）
   数组（size > 1）：从 size 最大的开始，轮流放进各 bank
   标量（size == 1/4）：接在数组后面
@@ -69,7 +69,10 @@ def layout(pointers, bank_size, banks):
     # 哨兵：模拟器 while(dmem[MEM_SIZE/2-1]==0) 靠 loopend 结束
     reserved = {}
     if any(n == "loopend" for n, _ in pointers):
-        reserved["loopend"] = bank_size - 1
+        # 哨兵地址必须是 MEM_SIZE/2-1（仿真器 while(dmem[MEM_SIZE/2-1]==0)），
+        # 而 MEM_SIZE = banks*bank_size；banks=2 时正好等于 bank_size-1，
+        # 但 8x8 有 8 个 bank，写死 bank_size-1 会让哨兵落错 bank。
+        reserved["loopend"] = total // 2 - 1
     if any(n == "loopstart" for n, _ in pointers):
         reserved["loopstart"] = total - 2
 

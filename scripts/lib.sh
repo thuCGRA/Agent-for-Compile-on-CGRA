@@ -47,4 +47,12 @@ kfunc()   { awk -v k="$1" '!/^#/ && $1==k {print $2}' "$ROOT/scripts/kernels.tsv
 # 每个 kernel 一个固定工作目录：out/<kernel>/
 kdir() { echo "$OUT/$1"; }
 
+# 映射产物目录。4x4 保持历史路径 out/<k>/m<method>；其它阵列加后缀，
+# 否则同一 kernel 的 4x4 与 8x8 结果会互相覆盖，sweep 表就串了。
+mdir() {
+  local W; W="$(kdir "$1")"; local M="$2"; local XD=4 YD=4
+  if [ -f "$W/dims" ]; then read -r XD YD _ _ < "$W/dims"; fi
+  if [ "$XD" = 4 ] && [ "$YD" = 4 ]; then echo "$W/m$M"; else echo "$W/m${M}_${XD}x${YD}"; fi
+}
+
 banner() { printf '\n\033[1m== %s\033[0m\n' "$*"; }

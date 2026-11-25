@@ -14,13 +14,15 @@ activate_tc
 k="${1:?用法: map.sh <kernel> [method] [init_II] [xdim] [ydim]}"
 M="${2:-0}"
 II="${3:-0}"
-XDIM="${4:-4}"
-YDIM="${5:-4}"
 W="$(kdir "$k")"
+# 阵列默认跟随 arch.json 记录（inject_mem.sh 写的 out/<k>/dims），命令行可覆盖
+if [ -f "$W/dims" ]; then read -r _DXD _DYD _ _ < "$W/dims"; else _DXD=4; _DYD=4; fi
+XDIM="${4:-$_DXD}"
+YDIM="${5:-$_DYD}"
 [ -f "$W/dfg.xml" ]   || { echo "先跑 gen_dfg.sh $k" >&2; exit 2; }
 [ -f "$W/arch.json" ] || { echo "先跑 inject_mem.sh $k" >&2; exit 2; }
 
-R="$W/m$M"
+R="$(mdir "$k" "$M")"
 rm -rf "$R"; mkdir -p "$R"
 ln -s ../dfg.xml  "$R/dfg.xml"
 ln -s ../arch.json "$R/arch.json"

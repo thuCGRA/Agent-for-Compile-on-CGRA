@@ -5,6 +5,7 @@
  *      Author: manupa
  */
 
+#include <deque>
 #include <morpher/arch/CGRA.h>
 #include <morpher/arch/PE.h>
 #include <morpher/arch/Port.h>
@@ -1113,14 +1114,58 @@ void CGRAXMLCompile::CGRA::traverseUntil(PE *srcPE, PE *destPE, Port *currPort, 
 
 int CGRAXMLCompile::CGRA::getTimeDistBetweenPEs(PE *srcPE, PE *destPE)
 {
+	// TDIST-BFS: 上游这里用的是递归 DFS（traverseUntil），它对每个 Port 记录
+	// "已到达的最小 time_dist"，只有更小时才继续松弛——本质是写成 DFS 的最短路，
+	// 因此在 8x8 上不收敛：实测 trmm（11 个节点）在 -x 8 -y 8 上 10 分钟仍在跑，
+	// gdb 栈是 traverseUntil 无限自递归（CGRA.cpp:1110）。
+	// 边权只有 0/1（同拍跨 PE = 0，过寄存器 = 1），所以用 0-1 BFS 求同一批最短
+	// 距离，复杂度 O(V+E)。同时去掉 in_rectangle_range 剪枝：网格上最短路径不会
+	// 离开两点的外接矩形，距离不变，但结果不再依赖这个启发式。
 	int ret_val = INT32_MAX;
+	unordered_map<Port *, int> dist;
+	deque<Port *> dq;
 	for (Port *op : srcPE->outputPorts)
 	{
-		unordered_map<Port *, int> already_traversed;
-		int tmp = 0;
-		traverseUntil(srcPE, destPE, op, 0, already_traversed, tmp);
-		if (tmp != -1 && tmp < ret_val)
-			ret_val = tmp;
+		unordered_map<Port *, int>::iterator it = dist.find(op);
+		if (it == dist.end() || it->second > 0)
+		{
+			dist[op] = 0;
+			dq.push_front(op);
+		}
+	}
+	while (!dq.empty())
+	{
+		Port *p = dq.front();
+		dq.pop_front();
+		int d = dist[p];
+		PE *currPE = p->getMod()->getPE();
+		FU *currFU = p->getMod()->getFU();
+		if (currFU != NULL && currFU->isMEMFU())
+		{
+			if (d < TimeDistBetweenClosestMEMPEMap[srcPE->getName()])
+				TimeDistBetweenClosestMEMPEMap[srcPE->getName()] = d;
+		}
+		if (currFU != NULL && currPE == destPE && d < ret_val)
+			ret_val = d;
+		vector<Port *> nextPorts = p->getMod()->getNextPorts(p);
+		for (Port *q : nextPorts)
+		{
+			int time_delta = 0;
+			if (q->getMod()->get_t() != p->getMod()->get_t())
+				time_delta = 1;
+			if (p->getType() == REGO && q->getType() == REGI)
+				time_delta = 1;
+			int nd = d + time_delta;
+			unordered_map<Port *, int>::iterator it = dist.find(q);
+			if (it == dist.end() || nd < it->second)
+			{
+				dist[q] = nd;
+				if (time_delta == 0)
+					dq.push_front(q);
+				else
+					dq.push_back(q);
+			}
+		}
 	}
 	assert(ret_val != INT32_MAX);
 	return ret_val;
