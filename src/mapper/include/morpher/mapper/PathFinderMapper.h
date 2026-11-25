@@ -69,6 +69,7 @@ public:
 										  };
 
 	bool Map(CGRA *cgra, DFG *dfg);
+	bool MapInjected(CGRA *cgra, DFG *dfg); // INJECT: replay an external placement + routing
 	//	bool LeastCostPathAstar(Port* start, Port* end, DataPath* endDP, std::vector<Port*>& path, int& cost, DFGNode* node, std::map<Port*,std::set<DFGNode*>>& mutexPaths, DFGNode* currNode);
 	bool LeastCostPathAstar(LatPort start, LatPort end, DataPath *endDP, std::vector<LatPort> &path, int &cost, DFGNode *node, std::map<Port *, std::set<DFGNode *>> &mutexPaths, DFGNode *currNode);
 
