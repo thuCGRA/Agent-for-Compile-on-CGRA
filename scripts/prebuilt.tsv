@@ -1,0 +1,44 @@
+# 上游 Morpher 预生成 DFG 清单（Morpher_CGRA_Mapper/applications/）
+# 格式: <本工程 kernel 名>\t<相对 applications/ 的路径>
+# 这些 DFG 由上游仓库直接提供，没有可编译的 .c，靠 tools/prebuilt/synth_mem_alloc.py
+# 从 DFG 里反推 mem_alloc.txt 后进 mapper。
+
+# --- polybench（10 个，论文里最常引用的那批） ---
+pb_pre_2mm	polybench/2mm.xml
+pb_pre_2mm_u4	polybench/2mm_unroll4.xml
+pb_pre_atax	polybench/atax.xml
+pb_pre_atax_u4	polybench/atax_unroll4.xml
+pb_pre_bicg	polybench/bicg.xml
+pb_pre_bicg_u3	polybench/bicg_unroll3.xml
+pb_pre_cholesky	polybench/cholesky.xml
+pb_pre_cholesky_u4	polybench/cholesky_unroll4.xml
+pb_pre_doitgen	polybench/doitgen.xml
+pb_pre_doitgen_u4	polybench/doitgen_unroll4.xml
+
+# --- CGRA-ME microbench（9 个，小图） ---
+cme_accumulate	cgra_me_bench/accumulate/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_cap	cgra_me_bench/cap/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_conv2	cgra_me_bench/conv2/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_conv3	cgra_me_bench/conv3/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_mac	cgra_me_bench/mac/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_mac2	cgra_me_bench/mac2/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_mm	cgra_me_bench/matrixmultiply/multiply_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_mults1	cgra_me_bench/mults1/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_mults2	cgra_me_bench/mults2/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+cme_sum	cgra_me_bench/sum/main_INNERMOST_LN1_noSemiOLOAD_PartPred_DFG.xml
+
+# --- 真实应用内核（中等/大图） ---
+pre_adpcm_coder	adpcm_coder/adpcm_coder_INNERMOST_LN1_PartPred_DFG.xml
+pre_adpcm_decoder	adpcm_decoder/adpcm_decoder_INNERMOST_LN1_PartPred_DFG.xml
+pre_aes_decrypt	aes_decrypt/decrypt_INNERMOST_LN1_PartPred_DFG.xml
+pre_aes_encrypt	aes_encrypt/encrypt_INNERMOST_LN1_PartPred_DFG.xml
+pre_compare_neighb	compare_neighb/compare_neighb_INNERMOST_LN21_PartPred_DFG.xml
+pre_dct	dct/jpeg_fdct_islow_INNERMOST_LN2_PartPred_DFG.xml
+pre_dwt	dwt/dwpt_per_INNERMOST_LN11_PartPred_DFG.xml
+pre_finalSAD	finalSAD/finalSAD_INNERMOST_LN11_PartPred_DFG.xml
+pre_fix_fft	fix_fft_npb/fix_fft_INNERMOST_LN111_PartPred_DFG.xml
+pre_gemm_nt	gemm_nt/gemm_nt_INNERMOST_LN111_PartPred_DFG.xml
+pre_nw	nw/needwun_INNERMOST_LN1_PartPred_DFG.xml
+pre_pedometer	pedometer/pedometer_INNERMOST_LN1_PartPred_DFG.xml
+pre_realgsm	realgsm/Gsm_Long_Term_Predictor_INNERMOST_LN1_PartPred_DFG.xml
+pre_taylor	taylor/Taylor_App_INNERMOST_LN21_PartPred_DFG.xml

@@ -227,7 +227,7 @@ bool DFG::parseXML(std::string fileName)
 
 //				if(type == 0){
 				if(std::string(type)=="P"){
-					int npb;
+					int npb = 0;  // NPBHX: QueryIntAttribute leaves it untouched when NPB is absent
 					output->QueryIntAttribute("NPB", &npb);
 					output_ss<< "npb = " << npb;
 					assert(npb == 0 || npb == 1);

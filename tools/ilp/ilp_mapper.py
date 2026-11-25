@@ -248,18 +248,30 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
     pe_index = {p: i for i, p in enumerate(pes)}
     n_pe = len(pes)
 
-    # Admissible extra route delays.  0 = combinational, 1 = one register.
-    # `route_cycles_max >= 2` also admits II-1, the -1 wrap seen on trmm.
-    if timing == "register":
-        # A route of h hops crosses h registers, and even a same-PE transfer
-        # crosses one, so the admissible delays are exactly 1..max_hops.
-        delay_values = list(range(1, max_hops + 1))
-    elif route_cycles_max <= 0:
-        delay_values = [0]
-    elif route_cycles_max == 1:
-        delay_values = [0, 1]
-    else:
-        delay_values = sorted({0, 1, ii - 1})
+    # Admissible extra route delays, computed **per edge** because the bound
+    # depends on the hop count:
+    #   route_cycles_max < 0 (auto) -> d <= min(manhattan+1, II-1), plus the II-1
+    #       wrap seen on multi-cycle memory ops (trmm).  This is the bound the
+    #       module docstring always claimed; capping every edge at 1 made long
+    #       edges (3..8 hops) infeasible on the bigger benchmarks.
+    #   == 0 -> {0}   (combinational only)
+    #   == 1 -> {0,1} (what the mapper's own solutions use on small kernels)
+    #   >= 2 -> {0,1,II-1}
+    #   timing == "register" -> exactly max(h,1)
+    def delay_options(hh):
+        if timing == "register":
+            return [max(hh, 1)]
+        if route_cycles_max < 0:
+            hi = min(hh + 1, ii - 1)
+            d = list(range(0, hi + 1))
+            if ii > 2 and (ii - 1) not in d:
+                d.append(ii - 1)
+            return d
+        if route_cycles_max <= 0:
+            return [0]
+        if route_cycles_max == 1:
+            return [0, 1]
+        return sorted({0, 1, ii - 1})
 
     def supported(pe, op):
         kind = arch["kind"].get(pe, "PE")
@@ -359,7 +371,7 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
                     for tu in range(ii):
                         # dd = extra cycles the route consumes: 0 for a purely
                         # combinational path, 1 when a register is crossed.
-                        for dd in delay_values:
+                        for dd in delay_options(hh):
                             # register-timed fabric: the route latency is
                             # fully determined by the hop count.
                             if timing == "register" and dd != max(hh, 1):
@@ -414,8 +426,9 @@ def main(argv=None):
     ap.add_argument("--ii", type=int, default=0, help="0 = start from RecMinII")
     ap.add_argument("--max-ii", type=int, default=32)
     ap.add_argument("--hops", type=int, default=4)
-    ap.add_argument("--route-cycles", type=int, default=1,
-                    help="max cycles the route itself may consume (0 = combinational only)")
+    ap.add_argument("--route-cycles", type=int, default=-1,
+                    help="max cycles the route itself may consume; -1 (default) = "
+                         "auto, d <= min(manhattan+1, II-1); 0 = combinational only")
     ap.add_argument("--time-limit", type=float, default=60.0)
     ap.add_argument("--objective", choices=("hops", "balance"), default="hops")
     ap.add_argument("--timing", choices=("bypass", "register"), default="bypass",
