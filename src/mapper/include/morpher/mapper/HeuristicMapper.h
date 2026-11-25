@@ -13,6 +13,7 @@
 #include <morpher/arch/DataPath.h>
 #include <queue>
 #include <map>
+#include <set>
 #include <vector>
 #include <string>
 #include <assert.h>
@@ -257,6 +258,16 @@ public:
 		int t; // < 0 => spatial only, phase decided by the mapper
 	};
 	std::map<int, PinEntry> pins;
+
+	// ---- ROUTEGUIDE: externally supplied routing corridors ----------
+	struct RouteGuide
+	{
+		std::set<std::pair<int, int> > pes; // PEs the value may traverse
+		int maxHops;
+	};
+	std::map<std::pair<int, int>, RouteGuide> guides; // (producer, consumer) -> corridor
+	int routesTotal = 0;
+	bool loadRoutes(const std::string &path);
 	int pinsMode = 0; // 0 off, 1 strict, 2 spatial, 3 prefer, 4 repair
 	int pinsTotal = 0;
 	int pinsApplied = 0;

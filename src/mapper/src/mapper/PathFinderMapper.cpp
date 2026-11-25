@@ -137,6 +137,15 @@ bool CGRAXMLCompile::PathFinderMapper::LeastCostPathAstar(LatPort start,
 		//		}
 	};
 
+	// ROUTEGUIDE: pick the corridor for edge (producer -> consumer)
+	const RouteGuide *routeGuide = NULL;
+	{
+		std::map<std::pair<int, int>, RouteGuide>::const_iterator rgit =
+			guides.find(std::make_pair(node->idx, currNode->idx));
+		if (rgit != guides.end())
+			routeGuide = &rgit->second;
+	}
+
 	std::priority_queue<port_heuristic> q;
 
 	q.push(port_heuristic(start, 0, lessthanII));
@@ -225,6 +234,22 @@ bool CGRAXMLCompile::PathFinderMapper::LeastCostPathAstar(LatPort start,
 		for (LatPort nextLatPort : nextPorts)
 		{
 			Port *nextPort = nextLatPort.second;
+
+			// ROUTEGUIDE: keep the search inside the supplied corridor
+			if (routeGuide != NULL)
+			{
+				PE *guideCurrPE = currPort.second->findParentPE();
+				PE *guideNextPE = nextPort->findParentPE();
+				if (guideNextPE != NULL && guideCurrPE != guideNextPE)
+				{
+					if (routeGuide->pes.find(std::make_pair(guideNextPE->getPosition_X(),
+					                                        guideNextPE->getPosition_Y())) == routeGuide->pes.end())
+						continue;
+					if (curr_hops_to_port[currPort] + 1 > routeGuide->maxHops)
+						continue;
+				}
+			}
+
 
 			if (nextLatPort.first > end.first)
 				continue; //continue if the next port has higher latency
@@ -899,7 +924,10 @@ bool CGRAXMLCompile::PathFinderMapper::estimateRouting(DFGNode *node,
 	{
 		dest_with_cost top = estimatedRoutesTemp.top();
 		estimatedRoutesTemp.pop();
-		if (minLatDests[top.dest] == minLatSucc || !changed)
+		// ALLPHASE: with an external placement every phase must stay reachable.
+		// The minLatSucc filter below keeps only the earliest arrival phase, which
+		// silently hides later-phase destinations from applyPins().
+		if (pinsMode != 0 || minLatDests[top.dest] == minLatSucc || !changed)
 			estimatedRoutes.push(top);
 	}
 
@@ -951,6 +979,10 @@ bool CGRAXMLCompile::PathFinderMapper::Route(DFGNode *node,
 			LOG(ROUTE) << "currDP:" << currDest.dest->getName() << ",currPE:" << currDest.dest->getPE()->getName() << "\n";
 			LOG(ROUTE) << "currNode:" << currDest.dest->getMappedNode()->idx << "\n";
 		}
+		// ALLPHASE: with 63 candidates a destination may already be taken; skip it
+		// instead of asserting (Debug builds used to abort here).
+		if (pinsMode != 0 && currDest.dest->getMappedNode() != NULL)
+			continue;
 		assert(currDest.dest->getMappedNode() == NULL);
 		LOG(ROUTE) << "alreadyMappedChilds = " << currDest.alreadyMappedChilds.size() << "\n";
 

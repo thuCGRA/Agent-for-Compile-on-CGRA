@@ -133,6 +133,16 @@ int main(int argn, char *argc[])
 		mapper->pinsMode = 0;
 	}
 
+	// ROUTEGUIDE: external routing corridors
+	if (!args.routes_file.empty())
+	{
+		if (!mapper->loadRoutes(args.routes_file))
+		{
+			std::cout << "ROUTEGUIDE: could not load " << args.routes_file << "\n";
+			return 1;
+		}
+	}
+
 	//cout << "json_file_name = " << json_file_name << "\n";
 	// exit(EXIT_SUCCESS);
 

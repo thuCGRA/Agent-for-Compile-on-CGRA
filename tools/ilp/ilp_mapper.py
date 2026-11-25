@@ -39,6 +39,7 @@ Objective: minimise total hop count (i.e. total wire pressure).
 Usage:
     ilp_mapper.py --dfg dfg.xml --arch arch.json --ii 4 -o pins.txt
 """
+import os
 import argparse
 import json
 import re
@@ -220,7 +221,7 @@ def rec_min_ii(nodes, arch):
 
 
 def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
-                    route_cycles_max=1, timing="bypass"):
+                    route_cycles_max=1, timing="bypass", forbidden=None):
     """Solve placement + scheduling for one II.
 
     An edge u->v costs `L + d` cycles, where `L` is the operator latency and `d`
@@ -324,6 +325,20 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
     for s in slots:
         model.Add(sum(at[(n.idx, s)] for n in nodes.values()) <= 1)
 
+    # CEGIS: forbid placements that the routing model has already proven
+    # unroutable.  Each entry is {node_idx: (x, y, t)} covering every node, and
+    # the clause removes exactly that one point from the search space.
+    for fb in forbidden or []:
+        lits = []
+        for n in nodes.values():
+            if n.idx not in fb:
+                continue
+            x, y, t = fb[n.idx]
+            if (x, y, t) in slot_index:
+                lits.append(at[(n.idx, (x, y, t))].Not())
+        if lits:
+            model.AddBoolOr(lits)
+
     # channel placement into (pe, phase) integers
     pe_var, ph_var = {}, {}
     for n in nodes.values():
@@ -397,7 +412,9 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit
-    solver.parameters.num_search_workers = 8
+    # CDETERM: reproducible runs (see tools/patches/patch_deterministic.py)
+    solver.parameters.num_search_workers = int(os.environ.get("CP_SAT_THREADS", "8"))
+    solver.parameters.random_seed = int(os.environ.get("CP_SAT_SEED", "0"))
     status = solver.Solve(model)
 
     name = solver.StatusName(status)

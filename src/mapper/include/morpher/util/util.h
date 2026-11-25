@@ -48,6 +48,8 @@ struct arguments
 	// PINHOOK: external placement pins (ILP / SA warm start)
 	std::string pins_file = ""; // "idx x y t" per line, t<0 = spatial only
 	int pins_mode = 0;           // 0 off, 1 strict(x,y,t), 2 spatial(x,y), 3 prefer, 4 repair
+	// ROUTEGUIDE: external routing corridors (see tools/ilp/routes_to_guide.py)
+	std::string routes_file = "";
 };
 
 inline arguments old_parse_arguments(int argn, char *argc[])
@@ -145,6 +147,7 @@ inline arguments parse_arguments(int argn, char *argc[]){
 		.add_option<std::string>("", "--dfg_id", "the dfg id used to generate training data", "none")
 		.add_option<std::string>("", "--pins", "placement pins file (idx x y t per line)", "")
 		.add_option<int>("", "--pins_mode", "0 off,1 strict,2 spatial,3 prefer,4 repair", 0)
+		.add_option<std::string>("", "--routes", "routing guide file (src dst max_hops n x y ...)", "")
         .parse(argn, argc);
 
 	ret.dfg_filename = args.get_option<std::string>("--dfg");
@@ -167,6 +170,7 @@ inline arguments parse_arguments(int argn, char *argc[]){
 	lisa_arg.dfg_id = args.get_option<std::string>("--dfg_id");
 	ret.pins_file = args.get_option<std::string>("--pins");
 	ret.pins_mode = args.get_option<int>("--pins_mode");
+	ret.routes_file = args.get_option<std::string>("--routes");
 	ret.lisa_arg = lisa_arg;
 	assert(ret.dfg_filename!= "");
 	assert(ret.json_file_name!= "");

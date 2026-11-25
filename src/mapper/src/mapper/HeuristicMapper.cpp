@@ -133,6 +133,46 @@ bool HeuristicMapper::applyPins(DFGNode *node, std::priority_queue<dest_with_cos
 	++pinsApplied;
 	return true;
 }
+
+// ===== ROUTEGUIDE: external routing corridors =========================
+bool HeuristicMapper::loadRoutes(const std::string &path)
+{
+	std::ifstream in(path.c_str());
+	if (!in)
+	{
+		std::cout << "ROUTEGUIDE: cannot open " << path << "\n";
+		return false;
+	}
+	guides.clear();
+	routesTotal = 0;
+	std::string line;
+	while (std::getline(in, line))
+	{
+		if (line.empty() || line[0] == '#')
+			continue;
+		std::istringstream ss(line);
+		int src = 0, dst = 0, maxh = 0, n = 0;
+		if (!(ss >> src >> dst >> maxh >> n) || n <= 0)
+			continue;
+		RouteGuide g;
+		g.maxHops = maxh;
+		for (int i = 0; i < n; ++i)
+		{
+			int x = 0, y = 0;
+			if (!(ss >> x >> y))
+				break;
+			g.pes.insert(std::make_pair(x, y));
+		}
+		if (g.pes.empty())
+			continue;
+		guides[std::make_pair(src, dst)] = g;
+		++routesTotal;
+	}
+	std::cout << "ROUTEGUIDE: loaded " << routesTotal << " edge corridor(s) from " << path << "\n";
+	return routesTotal > 0;
+}
+// ===== end ROUTEGUIDE =================================================
+
 // ===== end PINHOOK ===================================================
 
 } /* namespace CGRAXMLCompile */
