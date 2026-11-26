@@ -65,6 +65,9 @@ def main(argv=None):
     ap.add_argument("--place-time-limit", type=float, default=20.0)
     ap.add_argument("--route-time-limit", type=float, default=20.0)
     ap.add_argument("--timing", choices=("bypass", "register"), default="bypass")
+    ap.add_argument("--select-coloc",
+                    choices=("exactly", "atmost", "atleast", "off"),
+                    default="exactly")
     ap.add_argument("--route-cycles", type=int, default=-1,
                     help="-1 = auto (d <= manhattan+1); see ilp_mapper.py")
     ap.add_argument("--pins-out", default=None)
@@ -89,6 +92,7 @@ def main(argv=None):
         pins, info = build_and_solve(
             nodes, arch, args.ii, args.max_hops, args.place_time_limit,
             "hops", args.route_cycles, args.timing, forbidden,
+            args.select_coloc,
         )
         if pins is None:
             print("round %d: placement %s  -> stop (no more placements)" % (rnd, info))

@@ -1933,6 +1933,11 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 		cur = out.back();
 
 		const int iim = cgra->get_t_max();
+		// The plan's first step is the producer's OUTPUT phase, which is one
+		// operator latency after the PE's own phase.  If they disagree, replaying
+		// this chain would place the value at the wrong cycles.
+		if (out.front().first % iim != ep->steps[0].second)
+			return false;
 		// Which register the value parks in: TREG while it is still at a FU
 		// output, otherwise the direction register of the side it entered the
 		// current PE from. Crossing a PE resets it, because "entered from" is
@@ -2068,6 +2073,142 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 		return true;
 	};
 
+
+	// BUILDPATH2: replay the ILP (PE, phase) plan but let the search pick the
+	// physical ports.  State = (port, absolute cycle, step).  A transition either
+	// stays on the step (intra-PE, same cycle), advances one cycle in a register
+	// (same PE), or crosses a wire (neighbour PE, same cycle).  Every visited
+	// port must be free or already carry this same producer (a legal broadcast).
+	//
+	// The cycle has to live in the state: a Port remembers the latency of the
+	// last value that used it, so getLat() is meaningless for an unused port.
+	// The plan's absolute cycles are anchored on the CONSUMER (end.first is
+	// derived from the consumer's real phase), then walked backwards; a plan
+	// whose first step does not land on the producer's output phase is rejected.
+	auto planCycles = [&](const EdgePath *ep, int nsteps, LatPort start, LatPort end,
+	                      std::vector<int> &absLat) -> bool {
+		const int iim = cgra->get_t_max();
+		std::vector<int> adv(nsteps, 0);
+		for (int k = 1; k < nsteps; ++k)
+		{
+			int a = (ep->steps[k].second - ep->steps[k - 1].second + iim) % iim;
+			if (a > 1)
+				return false;
+			adv[k] = a;
+		}
+		for (int bump = 0; bump <= 1; ++bump)
+		{
+			int last = end.first + bump * iim;
+			absLat.assign(nsteps, last);
+			for (int k = nsteps - 1; k > 0; --k)
+				absLat[k - 1] = absLat[k] - adv[k];
+			if (getenv("ROUTEPATH_DEBUG"))
+				std::cout << "PLANDBG nsteps=" << nsteps << " start=" << start.first
+				          << " end=" << end.first << " bump=" << bump
+				          << " absLat0=" << absLat[0] << " want_phase=" << ep->steps[0].second
+				          << " last=" << absLat[nsteps - 1] << "\n";
+			if (absLat[0] < start.first)
+				continue;
+			if (absLat[0] % iim != ep->steps[0].second)
+				continue;
+			return true;
+		}
+		return false;
+	};
+
+	auto searchPath = [&](const EdgePath *ep, const std::string &optype,
+	                      LatPort start, LatPort end, DFGNode *prod,
+	                      std::vector<LatPort> &out) -> bool {
+		out.clear();
+		const int nsteps = (int)ep->steps.size();
+		if (nsteps == 0)
+			return false;
+		std::vector<int> absLat;
+		if (!planCycles(ep, nsteps, start, end, absLat))
+		{
+			if (getenv("ROUTEPATH_DEBUG"))
+				std::cout << "SEARCHDBG: no plan cycles for " << prod->idx << "\n";
+			return false;
+		}
+
+		typedef std::pair<LatPort, int> State;
+		std::map<State, State> prev;
+		std::set<State> seen;
+		std::vector<State> frontier;
+		LatPort s0 = std::make_pair(absLat[0], start.second);
+		frontier.push_back(State(s0, 0));
+		seen.insert(State(s0, 0));
+		LatPort goal = std::make_pair(absLat[nsteps - 1], end.second);
+		bool found = false;
+		for (int iter = 0; iter < 64 && !frontier.empty() && !found; ++iter)
+		{
+			std::vector<State> next;
+			for (size_t fi = 0; fi < frontier.size() && !found; ++fi)
+			{
+				State st = frontier[fi];
+				if (st.first.second == goal.second && st.second == nsteps - 1)
+				{
+					found = true;
+					break;
+				}
+				LatPort cur = st.first;
+				int k = st.second;
+				std::vector<LatPort> cands = cur.second->getMod()->getNextPorts(cur, this);
+				for (size_t ci = 0; ci < cands.size(); ++ci)
+				{
+					LatPort nx = cands[ci];
+					DFGNode *occ = nx.second->getNode();
+					if (occ != NULL && occ != prod)
+						continue;
+					bool samePE = (nx.second->findParentPE() == cur.second->findParentPE());
+					int nk = -1;
+					if (samePE && nx.first == cur.first)
+						nk = k;
+					else if (samePE && nx.first == cur.first + 1 &&
+					         k + 1 < nsteps && absLat[k + 1] == absLat[k] + 1)
+						nk = k + 1;
+					else if (!samePE && nx.first == cur.first &&
+					         k + 1 < nsteps && absLat[k + 1] == absLat[k])
+						nk = k + 1;
+					else
+						continue;
+					PE *qpe = nx.second->getPE();
+					if (qpe->getPosition_X() != ep->steps[nk].first.first ||
+					    qpe->getPosition_Y() != ep->steps[nk].first.second)
+						continue;
+					State ns(nx, nk);
+					if (seen.count(ns))
+						continue;
+					seen.insert(ns);
+					prev[ns] = st;
+					next.push_back(ns);
+				}
+			}
+			frontier.swap(next);
+		}
+		if (!found)
+		{
+			if (getenv("ROUTEPATH_DEBUG"))
+				std::cout << "SEARCHDBG: no port chain, visited " << seen.size()
+				          << " state(s)\n";
+			return false;
+		}
+		std::vector<LatPort> rev;
+		State cur(goal, nsteps - 1);
+		while (true)
+		{
+			rev.push_back(cur.first);
+			if (cur.first.second == s0.second && cur.second == 0)
+				break;
+			if (!prev.count(cur))
+				return false;
+			cur = prev[cur];
+		}
+		for (int i = (int)rev.size() - 1; i >= 0; --i)
+			out.push_back(rev[i]);
+		return true;
+	};
+
 	// helper: route one edge for real; returns false and names the edge on failure
 	auto routeEdge = [&](DFGNode *parent, DFGNode *node) -> bool {
 		if (parent->rootDP == NULL || node->rootDP == NULL)
@@ -2105,9 +2246,22 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 			if (bpIt != edgePaths.end())
 			{
 				if (getenv("ROUTEPATH_DEBUG")) std::cout << "OPTYPEDBG edge " << parent->idx << " -> " << node->idx << " optype=" << parent->getOPtype(node) << " steps=" << bpIt->second.steps.size() << "\n"; // OPTYPEDBG
-if (!buildPath(&bpIt->second, parent->getOPtype(node), start, end, path) ||
-				    !pathIsFree(path, parent))
-				{
+bool okPath = buildPath(&bpIt->second, parent->getOPtype(node), start, end, path) &&
+				    pathIsFree(path, parent);
+				    if (!okPath)
+				    {
+				    	// BUILDPATH2: the exact port chain collided; replay the same timing
+				    	// plan but search for free ports instead.
+				    	path.clear();
+				    	okPath = searchPath(&bpIt->second, parent->getOPtype(node), start, end,
+				    	                    parent, path) &&
+				    	         pathIsFree(path, parent);
+				    	if (getenv("ROUTEPATH_DEBUG"))
+				    		std::cout << "BUILDPATH2: edge " << parent->idx << " -> " << node->idx
+				    		          << (okPath ? " rescued by corridor search" : " corridor search failed") << "\n";
+				    }
+				    if (!okPath)
+				    {
 					std::cout << "INJECT: could not build the supplied path for edge "
 					          << parent->idx << " -> " << node->idx << "\n";
 					return false;

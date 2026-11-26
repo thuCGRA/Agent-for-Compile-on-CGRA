@@ -33,6 +33,8 @@ Constraints:
     sum_n at[n][s] <= 1                 one op per PE per cycle
     at[n][s] == 0                       op not supported by that PE / bank mismatch
     AddAllowedAssignments(pe_u,ph_u,pe_v,ph_v,h_e)   timing + distance table
+    co(p1) + co(p2) == 1                SELECT: exactly one operand is local
+                                        (co(p) = p and the SELECT share a PE)
 
 Objective: minimise total hop count (i.e. total wire pressure).
 
@@ -221,7 +223,8 @@ def rec_min_ii(nodes, arch):
 
 
 def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
-                    route_cycles_max=1, timing="bypass", forbidden=None):
+                    route_cycles_max=1, timing="bypass", forbidden=None,
+                    select_coloc="exactly"):
     """Solve placement + scheduling for one II.
 
     An edge u->v costs `L + d` cycles, where `L` is the operator latency and `d`
@@ -356,6 +359,49 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
         model.Add(pe_var[n.idx] == sum(pe_index[s[0]] * at[(n.idx, s)] for s in slots))
         model.Add(ph_var[n.idx] == sum(s[1] * at[(n.idx, s)] for s in slots))
 
+    # SELECTCOLOC: a SELECT reads two operands in one cycle, and the PE has one
+    # local (ALU) path plus one network input register per direction.  If both
+    # operands arrived through the network they would contend for the same
+    # register, so the mapper always places exactly one data parent on the same
+    # PE as the SELECT (measured on array_add/mac/fir/conv2/trmm: 6 SELECTs, all
+    # of them with one local and one remote parent).  The predicate operand
+    # (type "PS") is a separate channel and is excluded.
+    #
+    # This is a *placement* constraint, not a routing one: `d` (the route delay)
+    # cannot distinguish "last hop inside the PE" from "last hop crossed a PE
+    # boundary" -- mac's two SELECTs both use d in {0,1} with opposite layouts.
+    rev_in = {}
+    for _n in nodes.values():
+        for (_v, _ni, _npb, _typ) in _n.outs:
+            if _v in nodes:
+                rev_in.setdefault(_v, []).append((_n.idx, _typ))
+    n_selcoloc = 0
+    if select_coloc != "off":
+        for _n in nodes.values():
+            if _n.op != "SELECT":
+                continue
+            _data = [(p, typ) for (p, typ) in rev_in.get(_n.idx, []) if typ != "PS"]
+            if len(_data) != 2:
+                continue
+            _p1, _p2 = _data[0][0], _data[1][0]
+            if _p1 == _p2:
+                continue
+            _co = []
+            for _p in (_p1, _p2):
+                _b = model.NewBoolVar("co_%d_%d" % (_n.idx, _p))
+                model.Add(pe_var[_p] == pe_var[_n.idx]).OnlyEnforceIf(_b)
+                model.Add(pe_var[_p] != pe_var[_n.idx]).OnlyEnforceIf(_b.Not())
+                _co.append(_b)
+            if select_coloc == "exactly":
+                model.Add(_co[0] + _co[1] == 1)
+            elif select_coloc == "atmost":
+                model.Add(_co[0] + _co[1] <= 1)
+            elif select_coloc == "atleast":
+                model.Add(_co[0] + _co[1] >= 1)
+            else:
+                sys.exit("unknown select_coloc: %s" % select_coloc)
+            n_selcoloc += 1
+
     hop_vars = []
     delay_vars = []
     for n in nodes.values():
@@ -436,11 +482,12 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
         pins[n.idx] = (pe[0], pe[1], solver.Value(ph_var[n.idx]))
     total_hops = sum(solver.Value(h) for h in hop_vars)
     total_delay = sum(solver.Value(d) for d in delay_vars)
-    return pins, "%s %-9s hops=%-3d route_cycles=%-3d wall=%.2fs" % (
+    return pins, "%s %-9s hops=%-3d route_cycles=%-3d selcoloc=%d wall=%.2fs" % (
         timing,
         name,
         total_hops,
         total_delay,
+        n_selcoloc,
         solver.WallTime(),
     )
 
@@ -460,6 +507,12 @@ def main(argv=None):
     ap.add_argument("--timing", choices=("bypass", "register"), default="bypass",
                     help="bypass = combinational PE output (HyCUBE); "
                          "register = one register per hop (conventional CGRA)")
+    ap.add_argument("--select-coloc",
+                    choices=("exactly", "atmost", "atleast", "off"),
+                    default="exactly",
+                    help="SELECT operand co-location: 'exactly' (default) forces "
+                         "one data parent onto the SELECT's own PE, which is what "
+                         "the HyCUBE PE can feed through its local ALU path")
     ap.add_argument("--spatial", action="store_true",
                     help="write t=-1 so the mapper keeps phase ownership")
     ap.add_argument("-o", "--out", default="pins.txt")
@@ -474,7 +527,8 @@ def main(argv=None):
     for ii in range(start, args.max_ii + 1):
         pins, info = build_and_solve(nodes, arch, ii, args.hops,
                                      args.time_limit, args.objective,
-                                     args.route_cycles, args.timing)
+                                     args.route_cycles, args.timing,
+                                     select_coloc=args.select_coloc)
         if pins is None:
             print("II = %-2d  %s" % (ii, info))
             continue
