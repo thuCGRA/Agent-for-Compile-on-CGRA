@@ -29,6 +29,7 @@ usage: mrrg_router.py --dfg X.xml --arch arch.json --pins pins.txt --ii 4
 """
 
 import argparse
+import os
 import json
 import sys
 import time
@@ -214,9 +215,10 @@ def solve(dfg, arch_path, pins, ii, slack=1, time_limit=60, max_regs=None,
     users = {}
     for (p, nd), var in y.items():
         users.setdefault(nd, []).append(var)
+    _cap = int(os.environ.get("MRRG_CAP", "1"))  # MRRG_CAP: diagnostic knob
     for nd, vs in users.items():
         if len(vs) > 1:
-            model.Add(sum(vs) <= 1)
+            model.Add(sum(vs) <= _cap)
 
     # flow conservation
     for ei, sp in enumerate(specs):
