@@ -47,7 +47,15 @@ import json
 import re
 import sys
 
+# A HyCUBE PartPred DFG uses O-prefixed names for the memory PE's own ops
+# (OLOAD/OLOADB/OLOADH/OLOADCL/OSTORE/OSTOREB/OSTOREH) alongside the plain
+# LOAD/STORE forms the pass emits for loop bookkeeping, so match on substring.
 MEM_OPS = frozenset(("LOAD", "LOADB", "LOADH", "LOADCL", "STORE", "STOREB", "STOREH"))
+
+
+def is_mem_op(op):
+    """True for both LOAD/STORE and HyCUBE's OLOAD/OSTORE spellings."""
+    return ("LOAD" in op) or ("STORE" in op)
 
 # attributes inside <Node ...> are sometimes missing the space before the next
 # key (e.g. ALAP="0"BB=""CONST="1"), so a real XML parser is not an option.
@@ -185,7 +193,7 @@ def rec_min_ii(nodes, arch):
     """
     lat = {}
     for n in nodes.values():
-        table = arch["mem"] if n.op in MEM_OPS else arch["alu"]
+        table = arch["mem"] if is_mem_op(n.op) else arch["alu"]
         lat[n.idx] = table.get(n.op, 1)
 
     best = 1
@@ -300,7 +308,7 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
         return abs(p[0] - q[0]) + abs(p[1] - q[1])
 
     def bank_ok(pe, node):
-        if node.op not in MEM_OPS:
+        if not is_mem_op(node.op):
             return True
         if arch["kind"].get(pe) != "PE_MEM":
             return False

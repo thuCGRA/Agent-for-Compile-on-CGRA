@@ -795,6 +795,40 @@ bool CGRAXMLCompile::PathFinderMapper::estimateRouting(DFGNode *node,
 	LOG(ROUTE)<< "Candidate Dests = " << candidateDests.size() << "\n";
 	if (candidateDests.empty())
 		return false;
+
+	// PINONLY: with an external placement the candidate set *is* the answer.
+	// Narrow it before any estimation so the native estimate + Route() below
+	// run on exactly the (x, y, t) the solver chose, and Route() still gets to
+	// reject it if the live port graph cannot be routed.
+	if (pinsMode == 7)
+	{
+		std::map<int, PinEntry>::const_iterator itp = pins.find(node->idx);
+		if (itp == pins.end())
+		{
+			std::cout << "PINONLY: node " << node->idx << " (" << node->op << ") has no pin\n";
+			return false;
+		}
+		std::vector<DataPath *> keep;
+		for (DataPath *d : candidateDests)
+		{
+			PE *pe = d->getPE();
+			if (pe->getPosition_X() != itp->second.x || pe->getPosition_Y() != itp->second.y)
+				continue;
+			if (itp->second.t >= 0 && pe->T != itp->second.t)
+				continue;
+			keep.push_back(d);
+		}
+		if (keep.empty())
+		{
+			std::cout << "PINONLY: node " << node->idx << " (" << node->op << ") pin ("
+					  << itp->second.x << "," << itp->second.y << "," << itp->second.t
+					  << ") is not a free datapath among " << candidateDests.size() << " candidate(s)\n";
+			return false;
+		}
+		candidateDests = keep;
+		std::cout << "PINONLY: node " << node->idx << " (" << node->op << ") restricted to ("
+				  << itp->second.x << "," << itp->second.y << "," << itp->second.t << ")\n";
+	}
 	//	assert(candidateDests.size()!=0);
 	//	node->blacklistDest.clear();
 
