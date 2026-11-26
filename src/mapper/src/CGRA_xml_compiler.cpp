@@ -143,6 +143,16 @@ int main(int argn, char *argc[])
 		}
 	}
 
+	// ROUTEPATH: exact per-edge (PE, phase) sequences from the ILP router
+	if (!args.route_path_file.empty())
+	{
+		if (!mapper->loadRoutePaths(args.route_path_file))
+		{
+			std::cout << "ROUTEPATH: could not load " << args.route_path_file << "\n";
+			return 1;
+		}
+	}
+
 	//cout << "json_file_name = " << json_file_name << "\n";
 	// exit(EXIT_SUCCESS);
 

@@ -173,6 +173,49 @@ bool HeuristicMapper::loadRoutes(const std::string &path)
 }
 // ===== end ROUTEGUIDE =================================================
 
+// ROUTEPATH: parse "src dst nsteps x0 y0 t0 x1 y1 t1 ..." per line.
+bool HeuristicMapper::loadRoutePaths(const std::string &path)
+{
+	std::ifstream in(path.c_str());
+	if (!in)
+	{
+		std::cout << "ROUTEPATH: cannot open " << path << "\n";
+		return false;
+	}
+	std::string line;
+	while (std::getline(in, line))
+	{
+		std::string::size_type h = line.find('#');
+		if (h != std::string::npos)
+			line = line.substr(0, h);
+		std::istringstream ss(line);
+		int src, dst, n;
+		if (!(ss >> src >> dst >> n) || n <= 0)
+			continue;
+		EdgePath ep;
+		bool ok = true;
+		for (int i = 0; i < n; ++i)
+		{
+			int x, y, t;
+			if (!(ss >> x >> y >> t))
+			{
+				ok = false;
+				break;
+			}
+			ep.steps.push_back(std::make_pair(std::make_pair(x, y), t));
+		}
+		if (!ok)
+		{
+			std::cout << "ROUTEPATH: truncated line for edge " << src << " -> " << dst << "\n";
+			return false;
+		}
+		edgePaths[std::make_pair(src, dst)] = ep;
+		++edgePathsTotal;
+	}
+	std::cout << "ROUTEPATH: loaded " << edgePathsTotal << " edge path(s)\n";
+	return edgePathsTotal > 0;
+}
+
 // ===== end PINHOOK ===================================================
 
 } /* namespace CGRAXMLCompile */

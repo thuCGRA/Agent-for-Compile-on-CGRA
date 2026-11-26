@@ -198,8 +198,33 @@ def solve_routes(nodes, arch, pins, ii, max_hops=4, link_cap=1, reg_cap=1,
         r_arcs = [f[(ei, ai)] for ai, (_a, k, _h, _r) in enumerate(arcs) if k == "r"]
         model.Add(sum(b_arcs) <= max_hops)
         model.Add(sum(r_arcs) <= ii - 1)
-        model.Add(sum(b_arcs) >= 0)
-        model.Add(sum(r_arcs) >= 0)
+        # At least one arc: a route with no arcs is not a route.
+        model.Add(sum(b_arcs) + sum(r_arcs) >= 1)
+
+    # ---- operand exclusivity at SELECT (# SELECTEXCL) ---------------------- #
+    # The reference simulator asserts ``!(I1isvalid && I2isvalid)`` for
+    # SELECT (src/simulator/CGRATile.cpp:168 and CGRATile::select()), i.e. at
+    # most one data operand may be *delivered through the crossbar* in the
+    # cycle the SELECT executes.  A value that entered the PE one cycle
+    # earlier through an input register is already local and does not count,
+    # so the rule is about the LAST arc of each parent: at most one parent may
+    # enter ``dst_node`` through a bypass arc.
+    last_bypass = {}
+    for ei, sp in enumerate(specs):
+        lits = [f[(ei, ai)] for ai, (arc, k, _h, _r) in enumerate(arcs)
+                if k == "b" and arc[1] == sp["dst_node"]]
+        if lits:
+            last_bypass[ei] = lits
+    sel_parents = {}
+    for ei, sp in enumerate(specs):
+        if nodes[sp["dst"]].op == "SELECT":
+            sel_parents.setdefault(sp["dst"], []).append(ei)
+    for _dst, eis in sel_parents.items():
+        lits = []
+        for ei in eis:
+            lits += last_bypass.get(ei, [])
+        if len(lits) > 1:
+            model.Add(sum(lits) <= 1)
 
     # ---- objective -------------------------------------------------------- #
     if objective == "hops":

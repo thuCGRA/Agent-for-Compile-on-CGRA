@@ -146,6 +146,31 @@ bool CGRAXMLCompile::PathFinderMapper::LeastCostPathAstar(LatPort start,
 			routeGuide = &rgit->second;
 	}
 
+	// ROUTEPATH: exact (PE, phase) waypoints for this edge
+	const EdgePath *edgePath = NULL;
+	if (!edgePaths.empty())
+	{
+		std::map<std::pair<int, int>, EdgePath>::const_iterator epit =
+			edgePaths.find(std::make_pair(node->idx, currNode->idx));
+		if (epit != edgePaths.end())
+			edgePath = &epit->second;
+	}
+	std::map<std::pair<PE *, int>, int> guideIdx;
+	if (edgePath != NULL)
+	{
+		PE *startPE = start.second->findParentPE();
+		if (startPE == NULL || start.first % II != edgePath->steps[0].second ||
+		    std::make_pair(startPE->getPosition_X(), startPE->getPosition_Y()) !=
+		        edgePath->steps[0].first)
+		{
+			std::cout << "ROUTEPATH: path for edge " << node->idx << " -> " << currNode->idx
+			          << " does not start at the producer, ignoring it\n";
+			edgePath = NULL;
+		}
+		else
+			guideIdx[std::make_pair(startPE, start.first)] = 0;
+	}
+
 	std::priority_queue<port_heuristic> q;
 
 	q.push(port_heuristic(start, 0, lessthanII));
@@ -187,7 +212,18 @@ bool CGRAXMLCompile::PathFinderMapper::LeastCostPathAstar(LatPort start,
 			paths[currPort] = curr.path;
 			if (currPort == end)
 			{
-				finalPath = *curr.pathVec;
+				// ROUTEPATH: only accept the end once the whole sequence is consumed
+				bool rpDone = true;
+				if (edgePath != NULL)
+				{
+					PE *endPE = end.second->findParentPE();
+					std::map<std::pair<PE *, int>, int>::const_iterator rpEnd =
+						guideIdx.find(std::make_pair(endPE, end.first));
+					int rpEndIdx = (rpEnd == guideIdx.end()) ? -1 : rpEnd->second;
+					rpDone = (rpEndIdx == (int)edgePath->steps.size() - 1);
+				}
+				if (rpDone)
+					finalPath = *curr.pathVec;
 			}
 		}
 
@@ -248,6 +284,33 @@ bool CGRAXMLCompile::PathFinderMapper::LeastCostPathAstar(LatPort start,
 					if (curr_hops_to_port[currPort] + 1 > routeGuide->maxHops)
 						continue;
 				}
+			}
+
+			// ROUTEPATH: follow the ILP sequence hop by hop, phase included
+			if (edgePath != NULL)
+			{
+				PE *rpCurrPE = currPort.second->findParentPE();
+				PE *rpNextPE = nextPort->findParentPE();
+				std::map<std::pair<PE *, int>, int>::const_iterator rpIt =
+					guideIdx.find(std::make_pair(rpCurrPE, currPort.first));
+				int rpIdx = (rpIt == guideIdx.end()) ? 0 : rpIt->second;
+				bool rpHop = (rpNextPE != NULL && rpCurrPE != NULL && rpNextPE != rpCurrPE);
+				bool rpReg = (nextLatPort.first != currPort.first);
+				if (rpHop || rpReg)
+				{
+					int rpNext = rpIdx + 1;
+					if (rpNext >= (int)edgePath->steps.size())
+						continue;
+					if (rpNextPE == NULL ||
+					    std::make_pair(rpNextPE->getPosition_X(), rpNextPE->getPosition_Y()) !=
+					        edgePath->steps[rpNext].first)
+						continue;
+					if (nextLatPort.first % II != edgePath->steps[rpNext].second)
+						continue;
+					guideIdx[std::make_pair(rpNextPE, nextLatPort.first)] = rpNext;
+				}
+				else if (rpNextPE != NULL)
+					guideIdx[std::make_pair(rpNextPE, nextLatPort.first)] = rpIdx;
 			}
 
 
@@ -1750,6 +1813,261 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 	// which corrupts the bitstream while keeping the value count right.
 	std::map<Port *, std::set<DFGNode *> > mutexPaths;
 
+	// BUILDPATH: deterministic replay of an ILP (PE, phase) sequence.
+	auto endsWith = [&](const std::string &nm, const std::string &suffix) -> bool {
+		return nm.size() >= suffix.size() &&
+		       nm.compare(nm.size() - suffix.size(), suffix.size(), suffix) == 0;
+	};
+
+	// Shortest chain of same-cycle, same-module moves from `from` to any port
+	// whose name ends with `suffix`. Bounded: a PE has ~25 ports.
+	auto intraPE = [&](LatPort from, const std::string &suffix, std::vector<LatPort> &out) -> bool {
+		out.clear();
+		std::map<Port *, Port *> prev;
+		std::vector<LatPort> frontier;
+		frontier.push_back(from);
+		std::set<Port *> seen;
+		seen.insert(from.second);
+		for (int depth = 0; depth < 6 && !frontier.empty(); ++depth)
+		{
+			std::vector<LatPort> next;
+			for (LatPort p : frontier)
+			{
+				std::vector<LatPort> cands = p.second->getMod()->getNextPorts(p, this);
+				for (LatPort c : cands)
+				{
+					if (c.first != from.first) // same cycle only
+						continue;
+					if (c.second->findParentPE() != from.second->findParentPE()) // stay in the PE
+						continue;
+					if (seen.count(c.second))
+						continue;
+					seen.insert(c.second);
+					prev[c.second] = p.second;
+					if (endsWith(c.second->getName(), suffix))
+					{
+						std::vector<Port *> rev;
+						Port *cur = c.second;
+						while (cur != from.second)
+						{
+							rev.push_back(cur);
+							cur = prev[cur];
+						}
+						for (std::vector<Port *>::reverse_iterator it = rev.rbegin();
+						     it != rev.rend(); ++it)
+							out.push_back(std::make_pair(from.first, *it));
+						return true;
+					}
+					next.push_back(c);
+				}
+			}
+			frontier = next;
+		}
+		return false;
+	};
+
+	auto dirOut = [&](int dx, int dy) -> std::string {
+		if (dx > 0) return "EAST_O";
+		if (dx < 0) return "WEST_O";
+		if (dy > 0) return "SOUTH_O";
+		return "NORTH_O";
+	};
+	auto dirIn = [&](int dx, int dy) -> std::string {
+		if (dx > 0) return "WEST_I";
+		if (dx < 0) return "EAST_I";
+		if (dy > 0) return "NORTH_I";
+		return "SOUTH_I";
+	};
+	auto dirReg = [&](int dx, int dy) -> std::string {
+		if (dx > 0) return "WR_RO"; // entered from the east, parks in the west reg
+		if (dx < 0) return "ER_RO";
+		if (dy > 0) return "NR_RO";
+		return "SR_RO";
+	};
+
+	auto buildPath = [&](const EdgePath *ep, const std::string &optype, LatPort start,
+	                     LatPort end, std::vector<LatPort> &out) -> bool {
+		out.clear();
+		if (ep == NULL || ep->steps.empty())
+			return false;
+		// A single step means the value never leaves the PE and never waits:
+		// the mapper itself records only the consumer operand port for such an
+		// edge (see the one-port blocks in routeInfo.log), so mirror that
+		// instead of looking for a path that does not exist.
+		if (ep->steps.size() == 1)
+		{
+			out.push_back(end);
+			if (end.second->getName() == optype) // `end` already is the operand port
+				return true;
+			std::vector<LatPort> cands = end.second->getMod()->getNextPorts(end, this);
+			for (LatPort c : cands)
+			{
+				if (c.first != end.first)
+					continue;
+				if (c.second->getName() == optype)
+				{
+					out.push_back(c);
+					return true;
+				}
+			}
+			if (getenv("ROUTEPATH_DEBUG"))
+			{
+				std::cout << "BUILDPATH: single-step end=" << end.second->getFullName()
+				          << " optype=" << optype << " cands:";
+				std::vector<LatPort> cc = end.second->getMod()->getNextPorts(end, this);
+				for (LatPort c : cc)
+					std::cout << " " << c.second->getName() << "@" << c.first;
+				std::cout << "\n";
+			}
+			return false;
+		}
+		std::vector<LatPort> seg;
+		LatPort cur = start;
+		out.push_back(cur);
+		if (!intraPE(cur, "DP0_T", seg)) // leave the producer FU
+		{
+			if (getenv("ROUTEPATH_DEBUG")) std::cout << "BUILDPATH: stage=leaveFU " << cur.second->getFullName() << "\n";
+			return false;
+		}
+		out.insert(out.end(), seg.begin(), seg.end());
+		cur = out.back();
+
+		const int iim = cgra->get_t_max();
+		// Which register the value parks in: TREG while it is still at a FU
+		// output, otherwise the direction register of the side it entered the
+		// current PE from. Crossing a PE resets it, because "entered from" is
+		// a property of the PE we are in.
+		std::string lastReg;
+		int entryDx = 0, entryDy = 0;
+		for (size_t k = 1; k < ep->steps.size(); ++k)
+		{
+			const std::pair<int, int> &prevPE = ep->steps[k - 1].first;
+			const std::pair<int, int> &thisPE = ep->steps[k].first;
+			int dPhase = (ep->steps[k].second - ep->steps[k - 1].second + iim) % iim;
+
+			if (prevPE != thisPE)
+			{
+				int dx = thisPE.first - prevPE.first;
+				int dy = thisPE.second - prevPE.second;
+				if (!intraPE(cur, dirOut(dx, dy), seg)) // walk to the facing output
+				{
+					if (getenv("ROUTEPATH_DEBUG")) std::cout << "BUILDPATH: stage=toOut " << cur.second->getFullName() << " want " << dirOut(dx, dy) << "\n";
+					return false;
+				}
+				out.insert(out.end(), seg.begin(), seg.end());
+				cur = out.back();
+				// step across the wire into the neighbour
+				LatPort nxt;
+				bool crossed = false;
+				std::vector<LatPort> cands = cur.second->getMod()->getNextPorts(cur, this);
+				for (LatPort c : cands)
+				{
+					if (c.first != cur.first)
+						continue;
+					if (!endsWith(c.second->getName(), dirIn(dx, dy)))
+						continue;
+					nxt = c;
+					crossed = true;
+					break;
+				}
+				if (!crossed)
+				{
+					if (getenv("ROUTEPATH_DEBUG")) std::cout << "BUILDPATH: stage=cross " << cur.second->getFullName() << " want " << dirIn(dx, dy) << "\n";
+					return false;
+				}
+				cur = nxt;
+				out.push_back(cur);
+				lastReg.clear(); // a new PE: the entry side decides the register
+				entryDx = dx;
+				entryDy = dy;
+			}
+			// burn dPhase cycles in a register, if any
+			for (int extra = 0; extra < dPhase; ++extra)
+			{
+				if (endsWith(cur.second->getName(), "DP0_T"))
+					lastReg = "TREG";
+				else if (lastReg.empty())
+					lastReg = dirReg(entryDx, entryDy).substr(0, 2);
+				std::string reg = lastReg + "_RO";
+				if (!intraPE(cur, reg, seg))
+				{
+					if (getenv("ROUTEPATH_DEBUG")) std::cout << "BUILDPATH: stage=toReg " << cur.second->getFullName() << " want " << reg << "\n";
+					return false;
+				}
+				out.insert(out.end(), seg.begin(), seg.end());
+				cur = out.back();
+				// the read-in side is one cycle later
+				LatPort rin;
+				bool got = false;
+				std::vector<LatPort> cands = cur.second->getMod()->getNextPorts(cur, this);
+				for (LatPort c : cands)
+				{
+					if (c.first != cur.first + 1)
+						continue;
+					std::string nm = c.second->getName();
+					if (endsWith(nm, "_RI"))
+					{
+						rin = c;
+						got = true;
+						break;
+					}
+				}
+				if (!got)
+				{
+					if (getenv("ROUTEPATH_DEBUG")) std::cout << "BUILDPATH: stage=regIn " << cur.second->getFullName() << "\n";
+					return false;
+				}
+				cur = rin;
+				out.push_back(cur);
+			}
+		}
+		// arrive at the consumer operand port
+		if (!intraPE(cur, "DP0_" + optype, seg))
+		{
+			if (getenv("ROUTEPATH_DEBUG")) std::cout << "BUILDPATH: stage=toDPin " << cur.second->getFullName() << " want DP0_" << optype << "\n";
+			return false;
+		}
+		out.insert(out.end(), seg.begin(), seg.end());
+		cur = out.back();
+		LatPort fin;
+		bool got = false;
+		std::vector<LatPort> cands = cur.second->getMod()->getNextPorts(cur, this);
+		for (LatPort c : cands)
+		{
+			if (c.first != cur.first)
+				continue;
+			if (c.second->getName() == optype)
+			{
+				fin = c;
+				got = true;
+				break;
+			}
+		}
+		if (!got)
+			return false;
+		out.push_back(fin);
+		return true;
+	};
+
+	// A route is only usable if every port on it is free (or already carries
+	// this same producer, which is a legal broadcast).  Without this check a
+	// conflicting route silently overwrites another value, and the bitstream
+	// still comes out -- with wrong data.
+	auto pathIsFree = [&](const std::vector<LatPort> &p, DFGNode *prod) -> bool {
+		for (LatPort q : p)
+		{
+			DFGNode *occ = q.second->getNode();
+			if (occ != NULL && occ != prod)
+			{
+				if (getenv("ROUTEPATH_DEBUG"))
+					std::cout << "BUILDPATH: port busy " << q.second->getFullName()
+					          << " by node " << occ->idx << "\\n";
+				return false;
+			}
+		}
+		return true;
+	};
+
 	// helper: route one edge for real; returns false and names the edge on failure
 	auto routeEdge = [&](DFGNode *parent, DFGNode *node) -> bool {
 		if (parent->rootDP == NULL || node->rootDP == NULL)
@@ -1780,6 +2098,25 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 		LatPort end = std::make_pair(destLat, destPort);
 		std::vector<LatPort> path;
 		int cost = 0;
+		// BUILDPATH: deterministic replay when the ILP supplied this edge
+		{
+			std::map<std::pair<int, int>, EdgePath>::const_iterator bpIt =
+				edgePaths.find(std::make_pair(parent->idx, node->idx));
+			if (bpIt != edgePaths.end())
+			{
+				if (getenv("ROUTEPATH_DEBUG")) std::cout << "OPTYPEDBG edge " << parent->idx << " -> " << node->idx << " optype=" << parent->getOPtype(node) << " steps=" << bpIt->second.steps.size() << "\n"; // OPTYPEDBG
+if (!buildPath(&bpIt->second, parent->getOPtype(node), start, end, path) ||
+				    !pathIsFree(path, parent))
+				{
+					std::cout << "INJECT: could not build the supplied path for edge "
+					          << parent->idx << " -> " << node->idx << "\n";
+					return false;
+				}
+				assignPath(parent, node, path);
+				++edgesRouted;
+				return true;
+			}
+		}
 		if (!LeastCostPathAstar(start, end, node->rootDP, path, cost, parent, mutexPaths, node))
 		{
 			std::cout << "INJECT: routing failed for edge " << parent->idx << " -> " << node->idx
@@ -4115,6 +4452,7 @@ void CGRAXMLCompile::PathFinderMapper::printHyCUBEBinary(CGRA* cgra) {
 					else{
 						insF.negated_predicate = "0";
 					}
+					if (getenv("EMITDBG")) { std::cout << "EMITDBG node=" << (currentMappedOP ? currentMappedOP->idx : -1) << " pe=(" << X << "," << Y << ") t=" << t << " i1=" << ((i1_ip && i1_ip->getNode()) ? i1_ip->getNode()->idx : -1) << " i2=" << ((i2_ip && i2_ip->getNode()) ? i2_ip->getNode()->idx : -1) << " p=" << ((p_ip && p_ip->getNode()) ? p_ip->getNode()->idx : -1) << " alu_i1=" << insF.alu_i1 << " alu_i2=" << insF.alu_i2 << " alu_p=" << insF.alu_p << " opcode=" << insF.opcode << " i1i2=" << ((currentMappedOP && currentMappedOP->type_i1i2) ? 1 : 0) << std::endl; } // EMITDBG
 					InsFArr[getIndexOfBin(t+1, Y, X)] = insF;
  					// InsFArr[t+1][Y][X] = insF;
 

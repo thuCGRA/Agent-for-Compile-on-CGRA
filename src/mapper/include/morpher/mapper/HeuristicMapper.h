@@ -268,6 +268,17 @@ public:
 	std::map<std::pair<int, int>, RouteGuide> guides; // (producer, consumer) -> corridor
 	int routesTotal = 0;
 	bool loadRoutes(const std::string &path);
+
+	// ROUTEPATH: the exact (PE, phase) sequence the ILP router chose for one
+	// DFG edge. A* still picks the ports inside a PE -- that part depends on
+	// crossbar occupancy -- but it may not choose its own PE sequence.
+	struct EdgePath
+	{
+		std::vector<std::pair<std::pair<int, int>, int> > steps; // ((x,y), phase)
+	};
+	std::map<std::pair<int, int>, EdgePath> edgePaths; // (producer, consumer)
+	int edgePathsTotal = 0;
+	bool loadRoutePaths(const std::string &path);
 	int pinsMode = 0; // 0 off, 1 strict, 2 spatial, 3 prefer, 4 repair
 	int pinsTotal = 0;
 	int pinsApplied = 0;

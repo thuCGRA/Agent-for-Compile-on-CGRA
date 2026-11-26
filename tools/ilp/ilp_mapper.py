@@ -260,6 +260,15 @@ def build_and_solve(nodes, arch, ii, max_hops, time_limit, objective,
     #   >= 2 -> {0,1,II-1}
     #   timing == "register" -> exactly max(h,1)
     def delay_options(hh):
+        # A zero-hop edge stays inside one PE.  HyCUBE has no combinational
+        # path from FU0.DP0_T back to FU0.DP0_I1, so it must spend a cycle in
+        # TREG; offering d == 0 there produced routes the mapper cannot build.
+        if hh == 0 and timing != "register":
+            opts = [d for d in _delay_options_raw(hh) if d != 0]
+            return opts or [1]
+        return _delay_options_raw(hh)
+
+    def _delay_options_raw(hh):
         if timing == "register":
             return [max(hh, 1)]
         if route_cycles_max < 0:
