@@ -2281,6 +2281,82 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 		LatPort end = std::make_pair(destLat, destPort);
 		std::vector<LatPort> path;
 		int cost = 0;
+		// PORTPATH: replay the port chain that mrrg_router.py solved globally.
+		{
+			std::map<std::pair<int, int>, PortPath>::const_iterator ppIt =
+				portPaths.find(std::make_pair(parent->idx, node->idx));
+			if (ppIt != portPaths.end())
+			{
+				const std::vector<PortStep> &st = ppIt->second.steps;
+				std::vector<LatPort> path;
+				bool ok = true;
+				// Work backwards from the consumer so the last port lands exactly on
+				// the cycle the consumer expects; every earlier step is one cycle
+				// earlier if its phase went back, otherwise in the same cycle.
+				int lat = destLat;
+				std::vector<int> lats(st.size(), 0);
+				for (int k = (int)st.size() - 1; k >= 0; k--)
+				{
+					if (k == (int)st.size() - 1)
+					{
+						if (st[k].t != (lat % ii)) { ok = false; break; }
+						lats[k] = lat;
+					}
+					else
+					{
+						int delta = ((st[k + 1].t - st[k].t) % ii + ii) % ii;
+						if (delta > 1) { ok = false; break; }
+						lats[k] = lats[k + 1] - delta;
+					}
+				}
+				if (ok)
+				{
+					// The producer's value is not available before start.first; a route
+					// can always be shifted forward by whole iterations.
+					while (lats[0] < start.first)
+					{
+						for (size_t k = 0; k < lats.size(); k++) lats[k] += ii;
+					}
+					for (size_t k = 0; k < st.size(); k++)
+					{
+						PE *pe = NULL;
+						for (PE *cand : cgra->getSpatialPEList(lats[k] % ii))
+						{
+							if (cand->getPosition_X() == st[k].x && cand->getPosition_Y() == st[k].y)
+							{
+								pe = cand;
+								break;
+							}
+						}
+						if (pe == NULL) { ok = false; break; }
+						Port *port = resolvePort(pe, st[k].port);
+						if (port == NULL)
+						{
+							std::cout << "PORTPATH: cannot resolve port " << st[k].port
+							          << " at (" << st[k].x << "," << st[k].y << ")\n";
+							ok = false;
+							break;
+						}
+						path.push_back(std::make_pair(lats[k], port));
+					}
+				}
+				if (ok && !pathIsFree(path, parent))
+				{
+					std::cout << "PORTPATH: edge " << parent->idx << " -> " << node->idx
+					          << " collides with an existing route\n";
+					ok = false;
+				}
+				if (!ok)
+				{
+					std::cout << "PORTPATH: could not replay edge " << parent->idx
+					          << " -> " << node->idx << "\n";
+					return false;
+				}
+				assignPath(parent, node, path);
+				++edgesRouted;
+				return true;
+			}
+		}
 		// BUILDPATH: deterministic replay when the ILP supplied this edge
 		{
 			std::map<std::pair<int, int>, EdgePath>::const_iterator bpIt =

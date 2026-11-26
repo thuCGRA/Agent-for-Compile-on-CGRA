@@ -216,6 +216,105 @@ bool HeuristicMapper::loadRoutePaths(const std::string &path)
 	return edgePathsTotal > 0;
 }
 
+
+// ===== PORTPATH: begin
+// Resolve a route-dump port name to the live Port object.  The spellings come
+// from PathFinderMapper's own printing code, so this covers exactly the names
+// that can appear in a *.routeInfo.log.
+Port *CGRAXMLCompile::HeuristicMapper::resolvePort(PE *pe, const std::string &name)
+{
+	if (!pe) return NULL;
+	std::string nm = name;
+	if (nm.empty()) return NULL;
+	if (getenv("PORTPATH_DEBUG"))
+		std::cerr << "PORTPATH: resolve " << nm << " at " << pe->getName()
+		          << std::endl;
+
+	std::vector<std::string> parts;
+	std::string cur;
+	for (size_t i = 0; i < nm.size(); i++)
+	{
+		if (nm[i] == '.')
+		{
+			parts.push_back(cur);
+			cur.clear();
+		}
+		else
+		{
+			cur.push_back(nm[i]);
+		}
+	}
+	parts.push_back(cur);
+
+	if (parts.size() >= 2)
+	{
+		Module *fu = pe->getSubMod(parts[0]);
+		if (!fu) return NULL;
+		if (parts.size() == 2)
+		{
+			if (parts[1] == "DP0_T") return fu->getOutPort("DP0_T");
+			return fu->getInPort(parts[1]);
+		}
+		Module *dp = fu->getSubMod(parts[1]);
+		if (!dp) return NULL;
+		if (parts[2] == "T") return dp->getOutPort("T");
+		return dp->getInPort(parts[2]);
+	}
+
+	if (nm.size() > 6 && nm.compare(nm.size() - 6, 6, "_XBARI") == 0)
+		return pe->getInternalPort(nm);
+	// Module::getSingleRegPort() has its assert() commented out and no return
+	// statement, so a name miss hands back a garbage pointer.  getRegPort()
+	// keeps its assert and returns the (_RI, _RO) pair; pick the right side.
+	if (nm.size() > 3 && nm.compare(nm.size() - 3, 3, "_RO") == 0)
+		return pe->getRegPort(nm.substr(0, nm.size() - 3)).second;
+	if (nm.size() > 3 && nm.compare(nm.size() - 3, 3, "_RI") == 0)
+		return pe->getRegPort(nm.substr(0, nm.size() - 3)).first;
+	// Dispatch on the suffix instead of probing: Module::getInPort() asserts
+	// rather than returning NULL, so a wrong probe aborts the process.
+	if (nm.size() > 2 && nm.compare(nm.size() - 2, 2, "_I") == 0)
+		return pe->getInPort(nm);
+	if (nm.size() > 2 && nm.compare(nm.size() - 2, 2, "_O") == 0)
+		return pe->getOutPort(nm);
+	std::cerr << "PORTPATH: unknown port name " << nm << std::endl;
+	return NULL;
+}
+
+bool CGRAXMLCompile::HeuristicMapper::loadPortPaths(const std::string &path)
+{
+	std::ifstream fh(path.c_str());
+	if (!fh.is_open())
+	{
+		std::cout << "PORTPATH: cannot open " << path << "\n";
+		return false;
+	}
+	std::string line;
+	while (std::getline(fh, line))
+	{
+		std::string::size_type h = line.find('#');
+		if (h != std::string::npos) line = line.substr(0, h);
+		std::istringstream ss(line);
+		int src, dst, n;
+		if (!(ss >> src >> dst >> n)) continue;
+		if (n <= 0) continue;
+		PortPath pp;
+		for (int i = 0; i < n; i++)
+		{
+			PortStep st;
+			if (!(ss >> st.x >> st.y >> st.t >> st.port)) break;
+			pp.steps.push_back(st);
+		}
+		if ((int)pp.steps.size() == n)
+		{
+			portPaths[std::make_pair(src, dst)] = pp;
+			portPathsTotal++;
+		}
+	}
+	std::cout << "PORTPATH: loaded " << portPathsTotal << " port-level route(s)\n";
+	return portPathsTotal > 0;
+}
+// ===== PORTPATH: end
+
 // ===== end PINHOOK ===================================================
 
 } /* namespace CGRAXMLCompile */

@@ -272,6 +272,21 @@ public:
 	// ROUTEPATH: the exact (PE, phase) sequence the ILP router chose for one
 	// DFG edge. A* still picks the ports inside a PE -- that part depends on
 	// crossbar occupancy -- but it may not choose its own PE sequence.
+	// PORTPATH: one solved route per DFG edge, as (x, y, t, port) steps.
+	struct PortStep
+	{
+		int x, y, t;
+		std::string port;
+	};
+	struct PortPath
+	{
+		std::vector<PortStep> steps;
+	};
+	std::map<std::pair<int, int>, PortPath> portPaths;
+	int portPathsTotal = 0;
+	bool loadPortPaths(const std::string &path);
+	Port *resolvePort(PE *pe, const std::string &name);
+
 	struct EdgePath
 	{
 		std::vector<std::pair<std::pair<int, int>, int> > steps; // ((x,y), phase)

@@ -144,6 +144,10 @@ int main(int argn, char *argc[])
 	}
 
 	// ROUTEPATH: exact per-edge (PE, phase) sequences from the ILP router
+	if (!args.port_path_file.empty())
+	{
+		if (!mapper->loadPortPaths(args.port_path_file)) return 1;
+	}
 	if (!args.route_path_file.empty())
 	{
 		if (!mapper->loadRoutePaths(args.route_path_file))
