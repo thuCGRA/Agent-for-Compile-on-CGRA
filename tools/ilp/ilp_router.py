@@ -127,18 +127,46 @@ def solve_routes(nodes, arch, pins, ii, max_hops=4, link_cap=1, reg_cap=1,
     grid = [(x, y) for y in range(ydim) for x in range(xdim)]
     dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 
-    bypass = []   # (u, v)  u=(x,y,t) v=(x+dx,y+dy,t)
+    # A value travelling east leaves through EAST_O and lands on the
+    # neighbour's WEST_I, so the crossbar it then crosses is WEST_XBARI and
+    # the register it can wait in is WR.  _ENTRY maps (dx, dy) to that letter.
+    _ENTRY = {(1, 0): "W", (-1, 0): "E", (0, 1): "N", (0, -1): "S"}
+
+    arcs = []      # (u, v, kind, hop_cost, reg_cost)
+    xbar_of = []   # ai -> (x, y, DIR, t) crossbar consumed at the sink, or None
+    reg_of = []    # ai -> (x, y, RES, t) register occupied, or None
+
+    # bypass: 0 cycles, leaves through an output port, crosses the sink's
+    # crossbar in the same cycle.
     for (x, y) in grid:
         for (dx, dy) in dirs:
             nx, ny = x + dx, y + dy
             if (nx, ny) not in arch["kind"]:
                 continue
+            d = _ENTRY[(dx, dy)]
             for t in range(ii):
-                bypass.append(((x, y, t), (nx, ny, t)))
-    register = [((x, y, t), (x, y, (t + 1) % ii))
-                for (x, y) in grid for t in range(ii)]
+                arcs.append((((x, y, t), (nx, ny, t)), "b", 1, 0))
+                xbar_of.append((nx, ny, d, t))
+                reg_of.append(None)
 
-    arcs = [(a, "b", 1, 0) for a in bypass] + [(a, "r", 0, 1) for a in register]
+    # input registers NR/ER/WR/SR: 1 cycle, then that direction's crossbar.
+    # TREG: 1 cycle on the output side, straight into the FU inputs with no
+    # crossbar (FU0.DP0_T -> TREG -> FU0.DP0_I1).
+    for (x, y) in grid:
+        for t in range(ii):
+            cur = (x, y, t)
+            nxt = (x, y, (t + 1) % ii)
+            for d in ("N", "E", "W", "S"):
+                arcs.append(((cur, nxt), "r", 0, 1))
+                xbar_of.append((x, y, d, nxt[2]))
+                # Keyed by the cycle the value becomes readable: that is what
+                # the mapper stores (assignPath -> setNode(src, lat, ...)), and
+                # what its pathIsFree compares.  Keying by the entry cycle made
+                # TREG@3 and TREG@0 look disjoint while both were live at 4.
+                reg_of.append((x, y, d, nxt[2]))
+            arcs.append(((cur, nxt), "t", 0, 1))
+            xbar_of.append(None)
+            reg_of.append((x, y, "T", nxt[2]))
 
     model = cp_model.CpModel()
 
@@ -180,22 +208,70 @@ def solve_routes(nodes, arch, pins, ii, max_hops=4, link_cap=1, reg_cap=1,
     # ---- per-producer capacity (multicast is free) ------------------------ #
     used = {}
     for (prod, ai), eis in by_prod_arc.items():
-        cap = link_cap if arcs[ai][1] == "b" else reg_cap
-        y = model.NewBoolVar("y_%d_%d" % (prod, ai))
+        yv = model.NewBoolVar("y_%d_%d" % (prod, ai))
         for ei in eis:
-            model.Add(f[(ei, ai)] <= y)
-        model.Add(y <= sum(f[(ei, ai)] for ei in eis))
-        used[(prod, ai)] = y
+            model.Add(f[(ei, ai)] <= yv)
+        model.Add(yv <= sum(f[(ei, ai)] for ei in eis))
+        used[(prod, ai)] = yv
+
+    # One value per directed PE-to-PE link per cycle.
     for ai, (_arc, kind, _hc, _rc) in enumerate(arcs):
-        cap = link_cap if kind == "b" else reg_cap
+        if kind != "b":
+            continue
         users = [used[(prod, ai)] for (prod, a2) in used if a2 == ai]
         if len(users) > 1:
-            model.Add(sum(users) <= cap)
+            model.Add(sum(users) <= link_cap)
+
+    # DIR_XBARI is a single mux: at most one value crosses it per cycle,
+    # whether it arrived combinationally on DIR_I or spent a cycle in DR.
+    # Charging only the bypass arcs (the old model) let two values meet on
+    # the same crossbar; the mapper then failed with "port busy".
+    xbar_users, reg_users = {}, {}
+    for ai in range(len(arcs)):
+        users = [used[(prod, ai)] for (prod, a2) in used if a2 == ai]
+        xk = xbar_of[ai]
+        if xk is not None:
+            xbar_users.setdefault(xk, []).extend(users)
+        rk = reg_of[ai]
+        if rk is not None:
+            reg_users.setdefault(rk, []).extend(users)
+    if os.environ.get("ROUTER_DBG"):
+        _mc = [(k, len(v)) for k, v in reg_users.items() if len(v) > 1]
+        print("ROUTER_DBG reg_keys=%d multi=%d xbar_keys=%d arcs=%d"
+              % (len(reg_users), len(_mc), len(xbar_users), len(arcs)),
+              file=sys.stderr)
+        for _k, _n in _mc[:12]:
+            print("   reg %s users=%d" % (_k, _n), file=sys.stderr)
+    for _xk, lits in xbar_users.items():
+        if len(lits) > 1:
+            model.Add(sum(lits) <= 1)
+    for rk, lits in reg_users.items():
+        if len(lits) <= 1:
+            continue
+        # TREG is a single register; the four input registers are separate.
+        model.Add(sum(lits) <= (1 if rk[2] == "T" else reg_cap))
+
+    # ---- where a register may be entered ---------------------------------- #
+    # TREG is fed only by FU0.DP0_T, so it is only reachable at the edge's own
+    # source node; the direction registers NR/ER/WR/SR are fed only by the
+    # direction ports, so they are only reachable after a hop.  Without this
+    # the plan could put TREG mid-path while the mapper built an input
+    # register there, and the two capacity accounts diverge.
+    _t_arcs = [ai for ai, (_a, k, _h, _r) in enumerate(arcs) if k == "t"]
+    _r_arcs = [ai for ai, (_a, k, _h, _r) in enumerate(arcs) if k == "r"]
+    for ei, sp in enumerate(specs):
+        for ai in _r_arcs:
+            if arcs[ai][0][0] == sp["src_node"]:
+                model.Add(f[(ei, ai)] == 0)
+        for ai in _t_arcs:
+            if arcs[ai][0][0] != sp["src_node"]:
+                model.Add(f[(ei, ai)] == 0)
 
     # ---- per-edge length bounds ------------------------------------------- #
     for ei, sp in enumerate(specs):
         b_arcs = [f[(ei, ai)] for ai, (_a, k, _h, _r) in enumerate(arcs) if k == "b"]
-        r_arcs = [f[(ei, ai)] for ai, (_a, k, _h, _r) in enumerate(arcs) if k == "r"]
+        r_arcs = [f[(ei, ai)] for ai, (_a, k, _h, _r) in enumerate(arcs)
+                  if k != "b"]
         model.Add(sum(b_arcs) <= max_hops)
         model.Add(sum(r_arcs) <= ii - 1)
         # At least one arc: a route with no arcs is not a route.
@@ -226,18 +302,43 @@ def solve_routes(nodes, arch, pins, ii, max_hops=4, link_cap=1, reg_cap=1,
         if len(lits) > 1:
             model.Add(sum(lits) <= 1)
 
+    # ---- at most one register per PE visit -------------------------------- #
+    # A value that crossed a register sits at the FU output (TREG) or behind an
+    # input register; either way the next arc must be a bypass.  Two registers
+    # back to back inside one PE cannot be built.
+    _reg_in, _reg_out = {}, {}
+    for ai, (_a, k, _h, _r) in enumerate(arcs):
+        if k == "b":
+            continue
+        _reg_in.setdefault(_a[1], []).append(ai)
+        _reg_out.setdefault(_a[0], []).append(ai)
+    _n_double = 0
+    for ei, sp in enumerate(specs):
+        if sp["src_node"] == sp["dst_node"]:
+            continue
+        for v in set(list(_reg_in) + list(_reg_out)):
+            ins = [f[(ei, ai)] for ai in _reg_in.get(v, [])]
+            outs = [f[(ei, ai)] for ai in _reg_out.get(v, [])]
+            if ins and outs:
+                model.Add(sum(ins) + sum(outs) <= 1)
+                _n_double += 1
+
     # ---- objective -------------------------------------------------------- #
     if objective == "hops":
         terms = [10 * f[(ei, ai)] for ei in range(len(specs))
                  for ai, (_a, k, _h, _r) in enumerate(arcs) if k == "b"]
         terms += [f[(ei, ai)] for ei in range(len(specs))
-                  for ai, (_a, k, _h, _r) in enumerate(arcs) if k == "r"]
+                  for ai, (_a, k, _h, _r) in enumerate(arcs) if k != "b"]
         if terms:
             model.Minimize(sum(terms))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit
-    solver.parameters.num_search_workers = 8
+    # Same determinism knobs ilp_mapper honours: a multi-worker search makes
+    # two runs of the same command produce different routes, which makes any
+    # before/after table unexplainable.
+    solver.parameters.num_search_workers = int(os.environ.get("CP_SAT_THREADS", "8"))
+    solver.parameters.random_seed = int(os.environ.get("CP_SAT_SEED", "0"))
     status = solver.Solve(model)
     name = solver.StatusName(status)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):

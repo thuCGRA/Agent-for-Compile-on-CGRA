@@ -52,6 +52,11 @@ public:
 
 	void setNode(DFGNode *node, int latency, int dest ,  HeuristicMapper *hm = NULL);
 
+	// CYCLE_AWARE: (node, dest, lat) for every value this port has carried.
+	// getNode() only returns the latest one, which is not enough to decide
+	// whether a port is free in a *particular* cycle.
+	const std::vector<std::tuple<DFGNode *, int, int> > &getMappedNodes() { return mapped_nodes; }
+
 	DFGNode *getNode() { 
 		if(mapped_nodes.size() == 0){
 			return NULL;

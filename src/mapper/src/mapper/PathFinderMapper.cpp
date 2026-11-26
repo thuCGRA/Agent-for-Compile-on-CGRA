@@ -2058,16 +2058,24 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 	// this same producer, which is a legal broadcast).  Without this check a
 	// conflicting route silently overwrites another value, and the bitstream
 	// still comes out -- with wrong data.
+	// CYCLE_AWARE: a port is only busy if another producer already uses it in
+	// the *same* cycle.  Port::getNode() returns the latest writer regardless
+	// of cycle, so the old version rejected legal modulo-scheduled reuse.
 	auto pathIsFree = [&](const std::vector<LatPort> &p, DFGNode *prod) -> bool {
 		for (LatPort q : p)
 		{
-			DFGNode *occ = q.second->getNode();
-			if (occ != NULL && occ != prod)
+			const std::vector<std::tuple<DFGNode *, int, int> > &occ = q.second->getMappedNodes();
+			for (size_t oi = 0; oi < occ.size(); ++oi)
 			{
-				if (getenv("ROUTEPATH_DEBUG"))
-					std::cout << "BUILDPATH: port busy " << q.second->getFullName()
-					          << " by node " << occ->idx << "\\n";
-				return false;
+				DFGNode *on = std::get<0>(occ[oi]);
+				int olat = std::get<2>(occ[oi]);
+				if (on != NULL && on != prod && olat == q.first)
+				{
+					if (getenv("ROUTEPATH_DEBUG"))
+						std::cout << "BUILDPATH: port busy " << q.second->getFullName()
+						          << " at lat " << q.first << " by node " << on->idx << std::endl;
+					return false;
+				}
 			}
 		}
 		return true;
