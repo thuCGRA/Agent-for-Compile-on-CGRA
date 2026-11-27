@@ -10,6 +10,18 @@ import json
 import sys
 
 
+def _collapse_single_pe(steps):
+    # SINGLE_PORT_COLLAPSE: a value that never leaves its PE and never waits a
+    # cycle is recorded by the mapper as a bare sink port, e.g. a chain of one
+    # element ``FU0.DP0.I1`` (see routeInfo.log).  Emitting the full
+    # ``FU0.DP0_T -> ... -> FU0.DP0.I1`` walk instead marks FU0.DP0_T as owned
+    # by this edge at the sink latency, which perturbs the emitter's ALU_I
+    # detection (it compares dp->getInPort(op) against fu->getOutPort("DP0_T")).
+    if len(steps) > 1 and len(set((x, y, t) for (x, y, t, _p) in steps)) == 1:
+        return [steps[-1]]
+    return steps
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("routes")
@@ -27,6 +39,7 @@ def main(argv=None):
         steps = r.get("path") or r.get("steps") or []
         if not steps:
             continue
+        steps = _collapse_single_pe(steps)
         parts = [str(r["src"]), str(r["dst"]), str(len(steps))]
         for st in steps:
             if isinstance(st, dict):
