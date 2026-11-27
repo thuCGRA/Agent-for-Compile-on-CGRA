@@ -165,6 +165,22 @@ namespace HyCUBESim {
 				break;
 			case SELECT :
 				LOG(SIMULATOR) << ": SELECT," << operand1 << "," << operand2 << "\n";
+				if (getenv("OPNDBG")) {
+					std::cout << "OPNDBG x=" << X << " y=" << Y << " PC=" << PC
+					          << " kII=" << kII
+					          << " op=" << currIns.opcode
+					          << " prevI1=" << (int)prevIns.xB.I1
+					          << " prevI2=" << (int)prevIns.xB.I2
+					          << " curI1=" << (int)currIns.xB.I1
+					          << " curI2=" << (int)currIns.xB.I2
+					          << " tregwen=" << (int)currIns.tregwen
+					          << " I1q=" << I1.size() << " I2q=" << I2.size()
+					          << " ALUO=" << (int)ALU_O.first
+					          << " RES=" << (int)RES.first
+					          << " v1=" << (int)I1isvalid << " v2=" << (int)I2isvalid
+					          << " cv=" << (int)currIns.constValid << std::endl;
+				}
+				// OPNDBG: dump operand provenance just before the SELECT assertion
 				assert(!(I1isvalid && I2isvalid));
 				if(I1isvalid){
 					ALUTempOut=operand1;

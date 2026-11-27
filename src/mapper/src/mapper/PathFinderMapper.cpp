@@ -2343,7 +2343,21 @@ bool CGRAXMLCompile::PathFinderMapper::MapInjected(CGRA *cgra, DFG *dfg)
 				if (ok && !pathIsFree(path, parent))
 				{
 					std::cout << "PORTPATH: edge " << parent->idx << " -> " << node->idx
-					          << " collides with an existing route\n";
+					          << " collides with an existing route:";
+					for (size_t qi = 0; qi < path.size(); qi++)
+					{
+						const std::vector<std::tuple<DFGNode *, int, int> > &occ0 =
+							path[qi].second->getMappedNodes();
+						for (size_t oi = 0; oi < occ0.size(); oi++)
+						{
+							DFGNode *on0 = std::get<0>(occ0[oi]);
+							int olat0 = std::get<2>(occ0[oi]);
+							if (on0 != NULL && on0 != parent && olat0 == path[qi].first)
+								std::cout << " " << path[qi].second->getFullName()
+								          << "@" << path[qi].first << " by " << on0->idx;
+						}
+					}
+					std::cout << "\n";
 					ok = false;
 				}
 				if (!ok)

@@ -127,17 +127,43 @@ def lat_of(arch, op, is_mem_pe):
 
 # ---------------------------------------------------------------- the model
 
+def mem_pe_set(arch):
+    """Coordinates whose FU is FU_MEM, i.e. the x=0 (and x=max) columns."""
+    grid = None
+    for sub in arch["CGRA"]["SUBMODS"]:
+        if sub.get("PATTERN") == "GRID":
+            grid = sub
+            break
+    if not grid:
+        return set()
+    return set((m["X"], m["Y"]) for m in grid["MODS"] if m.get("MOD") == "PE_MEM")
+
+
 def build_specs(nodes, arch, pins, ii):
     """One flow unit per DFG edge, with its operand-carrying sink."""
+    mem_pes = mem_pe_set(arch)
     specs = []
     for n in nodes.values():
         if n.idx not in pins:
             continue
         px, py, pt = pins[n.idx]
-        mem = n.op.upper().find("LOAD") >= 0 or n.op.upper().find("STORE") >= 0
+        # LATENCY_BY_PLACEMENT: which FU executes the op depends on where it was
+        # pinned, not on the opcode.  An ADD placed on a PE_MEM column runs on
+        # FU_MEM (latency 2), so its result appears one cycle later than the same
+        # ADD on an ALU column (latency 1).  Reading the opcode alone puts two
+        # different producers on the same (PE, cycle, FU output) and makes the
+        # flow model report INFEASIBLE for a placement that is perfectly routable.
+        mem = (px, py) in mem_pes
         src_t = (pt + lat_of(arch, n.op, mem)) % ii
         for (vid, nextiter, _npb, typ) in n.outs:
             if vid not in nodes or vid not in pins:
+                continue
+            # PS is a pseudo edge: the predicate reaches a predicated op without
+            # occupying a route.  estimateRouting skips it outright
+            # (PathFinderMapper.cpp:878) and routeInfo.log logs the parent with
+            # an empty chain, so demanding a path here makes an otherwise
+            # routable placement INFEASIBLE.
+            if typ == "PS":
                 continue
             qx, qy, qt = pins[vid]
             dst_t = (qt + nextiter * ii) % ii
@@ -220,7 +246,7 @@ def solve(dfg, arch_path, pins, ii, slack=1, time_limit=60, max_regs=None,
         if len(vs) > 1:
             model.Add(sum(vs) <= _cap)
 
-    # flow conservation
+    # flow conservation, plus the cycle budget each edge must spend
     for ei, sp in enumerate(specs):
         sx, sy, st = sp["src_port"]
         dx, dy, dt = sp["dst_port"]
@@ -240,14 +266,29 @@ def solve(dfg, arch_path, pins, ii, slack=1, time_limit=60, max_regs=None,
                 model.Add(expr == -1)
             else:
                 model.Add(expr == 0)
+        # CYCLE_BUDGET: a bypass arc costs 0 cycles and a register arc costs 1,
+        # so the path from cycle st to cycle dt must use exactly (dt - st) mod ii
+        # register arcs.  Without this the model may wrap around the II boundary
+        # and burn ii extra registers per wrap -- fir got 56 instead of the
+        # mapper's 20 that way -- and the extra freedom is what made the search
+        # time out.  regs <= ii - 1 makes the congruence a single value.
+        regs_here = [flow[ei][(u, v)] for (u, v) in edge_arcs[ei]
+                     if edge_arcs[ei][(u, v)]]
+        need = (dt - st) % ii
+        if regs_here:
+            model.Add(sum(regs_here) == need)
+        elif need != 0:
+            raise RouterError(
+                "edge %d -> %d needs %d register step(s) but no register arc is "
+                "available inside the window" % (sp["src"], sp["dst"], need))
 
-    # objective: fewest register steps (each costs a cycle), then fewest arcs
-    reg_terms = []
-    for ei, sp in enumerate(specs):
-        for (u, v), var in flow[ei].items():
-            if edge_arcs[ei][(u, v)]:
-                reg_terms.append(var)
-    model.Minimize(sum(reg_terms) if reg_terms else 0)
+    # objective: shortest path per edge.  Register counts are already fixed by
+    # CYCLE_BUDGET, so what is left to choose is how far each value travels and
+    # which ports it occupies -- a plain arc count is the right cost, and it also
+    # removes zero-cost circulations (the ALU_I feedback arc closes a 0-cost
+    # cycle that flow could otherwise ride for free, blocking capacity).
+    all_f = [v for fl in flow for v in fl.values()]
+    model.Minimize(sum(all_f))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit)

@@ -115,10 +115,39 @@ def build(arch, ii, xdim=None, ydim=None):
 
     # 3. Datapath tail: the operand enters the FU, the op runs, the result
     #    leaves on DP0_T.  These are the names the mapper prints.
+    # NO_DATAPATH_THROUGH: only the operand hand-off.  Letting a path run
+    # FU0.DP0.Ix -> FU0.DP0.T -> FU0.DP0_T would let it exit on the ALU output of
+    # a PE where some other node is executing, and the mapper rejects exactly
+    # that ("edge 5 -> 20019 collides ... FU0.DP0.T@4 by 2").  DP0_T is still the
+    # source of every path: that one belongs to the producer itself.
+    # NO_ALU_BORROW: a value may not walk into a datapath and out of its ALU
+    # output -- that port belongs to the node executing on the PE, and the mapper
+    # rejects the squat ("edge 5 -> 20019 collides ... FU0.DP0.T@4 by 2").  The
+    # DP0.T -> DP0_T hand-off stays because it appears in the mapper's own dumps.
     for op in OPERANDS:
         intra.append((fu + ".DP0_" + op, fu + ".DP0." + op, 0))
-        intra.append((fu + ".DP0." + op, fu + ".DP0.T", 0))
     intra.append((fu + ".DP0.T", fu + ".DP0_T", 0))
+
+    # 3b. ALU_I: the same-PE combinational feedback path.  A PE can feed its own
+    #     result straight back into its operand port in the same cycle; the
+    #     simulator encodes this as xbar input ALU_I ("100") and the mapper
+    #     records it as a single-port chain with no intermediate hop.  The ADL
+    #     has no such connection (FU0.DP0_T only reaches the four output ports
+    #     and TREG), so without this arc a port-graph router is forced through
+    #     TREG -- one extra cycle, i.e. xbar input RES_I ("101") -- and reports
+    #     far more register steps than the mapper actually needs.
+    # ALU_I_DISABLED: the same-PE feedback arc is deliberately NOT modelled.
+    # The simulator's ALU_I input takes ALU_O unconditionally (CGRATile.cpp:396
+    # ``I1_tobewritten=ALU_O``, then updateRegisters pushes it whenever
+    # ALU_O.first), so a value delivered through ALU_I is *always* valid.  A
+    # SELECT must see exactly one valid operand (assert !(I1isvalid &&
+    # I2isvalid), CGRATile.cpp:168), and with ALU_I the local operand is
+    # unconditionally valid, so the assert fires as soon as the network operand
+    # also lands.  The mapper itself routes a same-PE operand through TREG
+    # (encoding RES_I = "101", conditional on tregwen) and never relies on
+    # ALU_I; we do the same and let CYCLE_BUDGET force d >= 1 for same-PE edges.
+    # for op in OPERANDS:
+    #     intra.append((fu + ".DP0_T", fu + ".DP0_" + op, 0))
 
     nodes = set()
     arcs = {}
@@ -151,7 +180,11 @@ def build(arch, ii, xdim=None, ydim=None):
         "kind": kind,
         "fu": fu,
         "source": fu + ".DP0_T",
-        "sinks": dict((op, fu + ".DP0_" + op) for op in OPERANDS),
+        # SINKS_AT_DP: end on the datapath operand port.  printHyCUBEBinary
+        # inspects dp->getInPort(op) (``FU0.DP0.I1``); a chain that stops at the
+        # FU-level ``FU0.DP0_I1`` leaves that port unassigned and the operand gets
+        # encoded as "111" (invalid), which the simulator then executes.
+        "sinks": dict((op, fu + ".DP0." + op) for op in OPERANDS),
         "intra": intra,
     }
     return nodes, arcs, meta
